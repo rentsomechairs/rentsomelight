@@ -1,0 +1,341 @@
+const PHOTON_BASE = 'https://photon.komoot.io';
+const OSRM_BASE = 'https://router.project-osrm.org';
+
+const STREET_SUFFIXES = new Set([
+  'st','street','rd','road','dr','drive','ln','lane','ave','avenue','blvd','boulevard','ct','court',
+  'cir','circle','trl','trail','pkwy','parkway','pl','place','way','ter','terrace','hwy','highway'
+]);
+
+function compactParts(parts) {
+  return parts.filter(Boolean).map((part) => String(part).trim()).filter(Boolean);
+}
+
+function normalizeText(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function tokenize(value) {
+  return normalizeText(value).split(' ').filter(Boolean);
+}
+
+function stripStreetSuffixes(tokens = []) {
+  return tokens.filter((token) => !STREET_SUFFIXES.has(token));
+}
+
+function cityLine(props = {}) {
+  return compactParts([
+    props.city,
+    props.county,
+    props.state,
+    props.postcode
+  ]).join(', ');
+}
+
+function streetLine(props = {}) {
+  return compactParts([
+    props.housenumber,
+    props.street,
+    props.name && !props.street ? props.name : ''
+  ]).join(' ');
+}
+
+function mapPhotonFeature(feature, index, origin = null) {
+  const props = feature?.properties || {};
+  const coords = Array.isArray(feature?.geometry?.coordinates) ? feature.geometry.coordinates : [];
+  const lon = Number(coords[0]);
+  const lat = Number(coords[1]);
+  const primaryLine = streetLine(props) || props.name || props.street || '';
+  const secondaryLine = cityLine(props) || compactParts([props.country]).join(', ');
+  const label = compactParts([primaryLine, secondaryLine]).join(', ') || props.name || '';
+  const distanceFromOriginMiles = origin && Number.isFinite(origin.lat) && Number.isFinite(origin.lon)
+    ? haversineMiles(origin, { lat, lon })
+    : null;
+
+  return {
+    label,
+    primaryLine,
+    secondaryLine,
+    lat,
+    lon,
+    placeId: props.osm_id || `${lat}|${lon}|${label}`,
+    distanceFromOriginMiles,
+    raw: feature,
+    rankIndex: index,
+    normPrimary: normalizeText(primaryLine),
+    normSecondary: normalizeText(secondaryLine),
+    normRoad: normalizeText(props.street || props.name || ''),
+    houseNumber: normalizeText(props.housenumber || ''),
+    cityName: normalizeText(props.city || ''),
+    stateName: normalizeText(props.state || ''),
+    postcode: normalizeText(props.postcode || ''),
+    countryName: normalizeText(props.country || ''),
+    type: props.type || ''
+  };
+}
+
+function distanceScore(miles) {
+  if (!Number.isFinite(miles)) return 0;
+  if (miles <= 2) return 520;
+  if (miles <= 5) return 430;
+  if (miles <= 10) return 330;
+  if (miles <= 20) return 230;
+  if (miles <= 35) return 140;
+  if (miles <= 50) return 60;
+  if (miles <= 75) return -80;
+  if (miles <= 100) return -220;
+  return -1600;
+}
+
+function getQueryParts(query) {
+  const normalized = normalizeText(query);
+  const tokens = tokenize(normalized);
+  const houseToken = /^\d+[a-z]?$/.test(tokens[0]) ? tokens[0] : '';
+  const streetTokens = stripStreetSuffixes(houseToken ? tokens.slice(1) : tokens);
+  return { normalized, tokens, houseToken, streetTokens };
+}
+
+function tokenCoverageScore(streetTokens, roadTokens) {
+  if (!streetTokens.length) return 0;
+  let exact = 0;
+  let prefix = 0;
+  streetTokens.forEach((token, idx) => {
+    const roadToken = roadTokens[idx] || '';
+    if (roadToken === token) {
+      exact += 1;
+      return;
+    }
+    if (roadToken.startsWith(token) || token.startsWith(roadToken)) {
+      prefix += 1;
+      return;
+    }
+    if (roadTokens.includes(token)) prefix += 0.5;
+  });
+  return (exact * 1.2) + prefix;
+}
+
+function scoreResult(entry, query, localHints = {}) {
+  const { normalized, tokens, houseToken, streetTokens } = getQueryParts(query);
+  if (!normalized || !tokens.length) return 0;
+
+  const primaryTokens = tokenize(entry.normPrimary);
+  const roadTokens = stripStreetSuffixes(tokenize(entry.normRoad));
+  const haystack = `${entry.normPrimary} ${entry.normSecondary}`.trim();
+  const joinedStreet = streetTokens.join(' ');
+  const joinedRoad = roadTokens.join(' ');
+  const looksLikeStreetAddress = Boolean(houseToken || streetTokens.length >= 1);
+  const localCity = normalizeText(localHints.city || '');
+  const localState = normalizeText(localHints.state || '');
+  const localZip = normalizeText(localHints.postcode || '');
+
+  let score = 0;
+  if (entry.normPrimary.startsWith(normalized)) score += 300;
+  else if (entry.normRoad.startsWith(normalized)) score += 280;
+  else if (haystack.startsWith(normalized)) score += 170;
+  else if (entry.normRoad.includes(normalized)) score += 120;
+  else if (entry.normPrimary.includes(normalized)) score += 90;
+
+  if (houseToken) {
+    if (entry.houseNumber === houseToken) score += 260;
+    else if (primaryTokens[0] === houseToken) score += 110;
+    else score -= 220;
+  }
+
+  if (streetTokens.length) {
+    const coverage = tokenCoverageScore(streetTokens, roadTokens);
+    if (joinedRoad === joinedStreet) score += 520;
+    else if (joinedRoad.startsWith(joinedStreet)) score += 430;
+    else if (joinedRoad.includes(joinedStreet)) score += 230;
+    else if (entry.normPrimary.includes(joinedStreet)) score += 120;
+    else score -= 420;
+
+    score += coverage * 95;
+
+    const lastToken = streetTokens[streetTokens.length - 1] || '';
+    if (lastToken && roadTokens.length) {
+      const roadJoined = roadTokens.join(' ');
+      if (!roadJoined.includes(lastToken) && !roadTokens.some((token) => token.startsWith(lastToken) || lastToken.startsWith(token))) {
+        score -= 240;
+      }
+    }
+
+    if (coverage < Math.max(1, streetTokens.length * 0.6)) score -= 220;
+  }
+
+  if (looksLikeStreetAddress && !entry.normRoad) score -= 260;
+  if (looksLikeStreetAddress && ['county','state','country','city','district','locality'].includes(String(entry.type))) score -= 220;
+
+  if (localCity && entry.cityName && entry.cityName === localCity) score += 60;
+  if (localState && entry.stateName && entry.stateName === localState) score += 35;
+  if (localZip && entry.postcode && entry.postcode === localZip) score += 40;
+
+  score += distanceScore(entry.distanceFromOriginMiles);
+  return score;
+}
+
+function rankResults(results, query, origin = null, localHints = {}) {
+  return [...results].sort((a, b) => {
+    const aScore = scoreResult(a, query, localHints);
+    const bScore = scoreResult(b, query, localHints);
+    if (aScore !== bScore) return bScore - aScore;
+
+    if (origin) {
+      const aDist = Number.isFinite(a.distanceFromOriginMiles) ? a.distanceFromOriginMiles : Number.POSITIVE_INFINITY;
+      const bDist = Number.isFinite(b.distanceFromOriginMiles) ? b.distanceFromOriginMiles : Number.POSITIVE_INFINITY;
+      if (Math.abs(aDist - bDist) > 0.05) return aDist - bDist;
+    }
+    return a.rankIndex - b.rankIndex;
+  });
+}
+
+export function debounce(fn, delay = 250) {
+  let timer = 0;
+  return (...args) => {
+    window.clearTimeout(timer);
+    timer = window.setTimeout(() => fn(...args), delay);
+  };
+}
+
+async function fetchPhoton(query, { limit = 10, origin = null } = {}) {
+  const url = new URL('/api', PHOTON_BASE);
+  url.searchParams.set('q', query);
+  url.searchParams.set('limit', String(Math.min(Math.max(limit, 1), 25)));
+  if (origin && Number.isFinite(origin.lat) && Number.isFinite(origin.lon)) {
+    url.searchParams.set('lat', String(origin.lat));
+    url.searchParams.set('lon', String(origin.lon));
+    url.searchParams.set('location_bias_scale', '0.35');
+  }
+  const response = await fetch(url.toString(), {
+    headers: { 'Accept': 'application/json' },
+    mode: 'cors',
+    cache: 'no-store'
+  });
+  if (!response.ok) {
+    throw new Error(`Address lookup failed (${response.status})`);
+  }
+  const payload = await response.json();
+  return Array.isArray(payload?.features) ? payload.features : [];
+}
+
+function parsePickupContext(context = {}) {
+  const source = String(context?.pickupGeocodedAddress || context?.pickupAddress || '').trim();
+  if (!source) return { city: '', state: '', postcode: '' };
+
+  const normalized = source.replace(/\s+/g, ' ').trim();
+  const zipMatch = normalized.match(/\b\d{5}(?:-\d{4})?\b/);
+  const stateMatch = normalized.match(/\b([A-Z]{2})\b(?:\s+\d{5}(?:-\d{4})?)?$/);
+  const parts = normalized.split(',').map((part) => part.trim()).filter(Boolean);
+
+  let city = '';
+  let state = '';
+  let postcode = zipMatch ? zipMatch[0] : '';
+
+  if (parts.length >= 2) city = parts[parts.length - 2];
+  if (stateMatch) state = stateMatch[1];
+  if (!state && parts.length) {
+    const last = parts[parts.length - 1].split(/\s+/).filter(Boolean);
+    state = last.find((token) => /^[A-Z]{2}$/.test(token)) || '';
+  }
+
+  return {
+    city: normalizeText(city),
+    state: normalizeText(state),
+    postcode: normalizeText(postcode)
+  };
+}
+
+function buildPhotonQueries(text, context = {}) {
+  const clean = String(text || '').trim();
+  const local = parsePickupContext(context);
+  const queries = [clean];
+
+  if (local.city && local.state) queries.push(`${clean} ${local.city} ${local.state}`);
+  if (local.city && !queries.includes(`${clean} ${local.city}`)) queries.push(`${clean} ${local.city}`);
+  if (local.postcode) queries.push(`${clean} ${local.postcode}`);
+
+  return { local, queries: [...new Set(queries)].filter(Boolean) };
+}
+
+export async function searchAddresses(query, { limit = 5, origin = null, context = null, maxDistanceMiles = 100 } = {}) {
+  const text = String(query || '').trim();
+  if (text.length < 3) return [];
+
+  const { local, queries } = buildPhotonQueries(text, context || {});
+  const featureBuckets = await Promise.all(
+    queries.map((entry) => fetchPhoton(entry, { limit: Math.max(limit * 4, 18), origin }))
+  );
+  const featureList = featureBuckets.flat();
+
+  const deduped = [];
+  const seen = new Set();
+  featureList.forEach((feature, index) => {
+    const mapped = mapPhotonFeature(feature, index, origin);
+    if (!Number.isFinite(mapped.lat) || !Number.isFinite(mapped.lon)) return;
+    const key = `${mapped.houseNumber}|${mapped.normRoad}|${mapped.cityName}|${mapped.stateName}|${mapped.postcode}|${mapped.lat.toFixed(5)}|${mapped.lon.toFixed(5)}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    deduped.push(mapped);
+  });
+
+  const withinRadius = origin && Number.isFinite(origin.lat) && Number.isFinite(origin.lon)
+    ? deduped.filter((entry) => !Number.isFinite(entry.distanceFromOriginMiles) || entry.distanceFromOriginMiles <= maxDistanceMiles)
+    : deduped;
+
+  const pool = withinRadius.length ? withinRadius : deduped;
+  return rankResults(pool, text, origin, local).slice(0, limit);
+}
+
+export async function geocodeAddress(query, { origin = null, context = null, maxDistanceMiles = 100 } = {}) {
+  const results = await searchAddresses(query, { limit: 1, origin, context, maxDistanceMiles });
+  return results[0] || null;
+}
+
+export function haversineMiles(origin, destination) {
+  if (!origin || !destination) return 0;
+  const toRad = (value) => (Number(value) * Math.PI) / 180;
+  const r = 3958.7613;
+  const dLat = toRad(destination.lat - origin.lat);
+  const dLon = toRad(destination.lon - origin.lon);
+  const lat1 = toRad(origin.lat);
+  const lat2 = toRad(destination.lat);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return r * c;
+}
+
+export async function getRoadMiles(origin, destination) {
+  if (!origin || !destination) throw new Error('Missing coordinates');
+  const coords = `${origin.lon},${origin.lat};${destination.lon},${destination.lat}`;
+  const url = new URL(`/route/v1/driving/${coords}`, OSRM_BASE);
+  url.searchParams.set('overview', 'false');
+  url.searchParams.set('alternatives', 'false');
+  url.searchParams.set('steps', 'false');
+  const response = await fetch(url.toString(), { headers: { 'Accept': 'application/json' }, mode: 'cors' });
+  if (!response.ok) throw new Error(`Routing failed (${response.status})`);
+  const payload = await response.json();
+  const meters = payload?.routes?.[0]?.distance;
+  if (!Number.isFinite(meters)) throw new Error('No route distance returned');
+  return meters / 1609.344;
+}
+
+export async function computeDeliveryEstimate(origin, destination) {
+  try {
+    const oneWayMiles = await getRoadMiles(origin, destination);
+    return {
+      oneWayMiles,
+      roundTripMiles: oneWayMiles * 2,
+      source: 'road'
+    };
+  } catch (error) {
+    const fallbackOneWay = haversineMiles(origin, destination);
+    return {
+      oneWayMiles: fallbackOneWay,
+      roundTripMiles: fallbackOneWay * 2,
+      source: 'straight-line',
+      fallbackReason: error?.message || 'Routing unavailable'
+    };
+  }
+}

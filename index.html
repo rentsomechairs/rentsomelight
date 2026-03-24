@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Rent Some Orders</title>
+  <link rel="stylesheet" href="assets/css/styles.css" />
+</head>
+<body>
+  <div class="landing-shell">
+    <div class="landing-card">
+      <div class="eyebrow">Firebase Ready</div>
+      <h1>Rent Some Orders</h1>
+      <p class="muted">Lightweight order tracking and public inquiry picker with Firebase-ready auth/data plus free backup tools.</p>
+      <div class="landing-actions">
+        <a class="btn btn-primary" href="quick-picker/index.html">Open Quick Picker</a>
+        <a class="btn btn-secondary" href="gallery/index.html">View Gallery</a>
+        <a class="btn btn-ghost" href="admin/index.html">Admin Login</a>
+            <div class="card landing-checker-card">
+        <div class="section-header" style="margin-bottom:10px;">
+          <div>
+            <div class="eyebrow">Quick Test</div>
+            <h2 style="margin:6px 0 0;">Delivery fee checker</h2>
+          </div>
+        </div>
+        <p id="checkerPickupNote" class="muted small" style="margin-top:0;">Loading pickup settings…</p>
+        <div class="form-row">
+          <label for="checkerAddress">Delivery address</label>
+          <div class="address-autocomplete">
+            <input id="checkerAddress" autocomplete="street-address" placeholder="Type a delivery address to test the quote" />
+            <div id="checkerSuggestions" class="address-suggestions hidden"></div>
+          </div>
+          <div id="checkerStatus" class="small muted"></div>
+        </div>
+        <div class="landing-checker-results">
+          <div class="landing-checker-stat">
+            <span>Estimated miles</span>
+            <strong id="checkerMiles">--</strong>
+          </div>
+          <div class="landing-checker-stat">
+            <span>Estimated fee</span>
+            <strong id="checkerFee">--</strong>
+          </div>
+        </div>
+        <div id="checkerSource" class="small muted"></div>
+        <div id="checkerResultNote" class="note-block" style="margin-top:12px;">Type a local delivery address to test the quote.</div>
+      </div>
+    </div>
+  </div>
+  <script type="module" src="assets/js/app-landing.js"></script>
+</body>
+</html>

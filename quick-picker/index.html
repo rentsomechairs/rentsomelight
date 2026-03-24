@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Quick Picker • Rent Some Orders</title>
+  <link rel="stylesheet" href="../assets/css/styles.css" />
+</head>
+<body>
+  <div class="quick-shell">
+    <div id="mobileTotalBar" class="mobile-total-bar" aria-hidden="false">
+      <div class="mobile-total-left">
+        <strong>Quick Picker</strong>
+        <span id="mobileStepCount" class="mobile-step-count">Step 1/6 • Exchange Date and Time</span>
+      </div>
+      <div id="mobileTotalWrap" class="mobile-total-right">
+        <span>Estimated total</span>
+        <strong id="mobileTotalAmount">$0.00</strong>
+      </div>
+    </div>
+
+    <form id="pickerForm" class="picker-layout staged-layout">
+      <div class="picker-grid" id="pickerStepsWrap">
+        <section id="step1" class="card staged-card staged-accordion open">
+          <button type="button" class="step-toggle" data-step-target="1"><span class="step-toggle-meta">Step 1</span><span class="step-toggle-title">Exchange Date and Time</span></button>
+          <div class="staged-body">
+            <h1 class="step-title">Exchange Date and Time</h1>
+            <div class="form-row two">
+              <div class="form-row"><label>Receive date</label><input id="receiveDate" type="date" required /></div>
+              <div class="form-row"><label>Receive time</label><input id="receiveTime" type="time" required /></div>
+            </div>
+            <div class="step-actions"><button type="button" id="nextStep1" class="btn btn-primary">Next</button></div>
+          </div>
+        </section>
+
+        <section id="step2" class="card staged-card staged-accordion collapsed">
+          <button type="button" class="step-toggle" data-step-target="2"><span class="step-toggle-meta">Step 2</span><span class="step-toggle-title">Return Date and Time</span></button>
+          <div class="staged-body">
+            <h2 class="step-title">Return Date and Time</h2>
+            <div class="form-row two">
+              <div class="form-row"><label>Return date</label><input id="returnDate" type="date" required /></div>
+              <div class="form-row"><label>Return time</label><input id="returnTime" type="time" required /></div>
+            </div>
+            <div class="step-actions"><button type="button" id="nextStep2" class="btn btn-primary">Next</button></div>
+          </div>
+        </section>
+
+        <section id="step3" class="card staged-card staged-accordion collapsed">
+          <button type="button" class="step-toggle" data-step-target="3"><span class="step-toggle-meta">Step 3</span><span class="step-toggle-title">Category Selection</span></button>
+          <div class="staged-body">
+            <h2 class="step-title">Category Selection</h2>
+            <p class="muted">Choose the category types you want first. You will pick the exact equipment and quantities in Step 4.</p>
+            <div id="categoryChips" class="category-chips"></div>
+            <div class="step-actions"><button type="button" id="nextStep3" class="btn btn-primary">Next</button></div>
+          </div>
+        </section>
+
+        <section id="step4" class="card staged-card staged-accordion collapsed">
+          <button type="button" class="step-toggle" data-step-target="4"><span class="step-toggle-meta">Step 4</span><span class="step-toggle-title">Equipment Selection</span></button>
+          <div class="staged-body">
+            <h2 class="step-title">Equipment Selection</h2>
+            <p class="muted">Use the arrows to check nearby dates, then choose equipment below by category.</p>
+            <div class="availability-nav">
+              <button type="button" id="availabilityPrev" class="btn btn-ghost btn-small" aria-label="Previous date">←</button>
+              <div id="availabilityDateLabel" class="availability-date-label"></div>
+              <button type="button" id="availabilityNext" class="btn btn-ghost btn-small" aria-label="Next date">→</button>
+            </div>
+            <div id="availabilityBoard" class="availability-board"></div>
+            <div id="itemChooser" class="picker-grid" style="margin-top:18px;"></div>
+            <div class="step-actions"><button type="button" id="nextStep4" class="btn btn-primary">Next</button></div>
+          </div>
+        </section>
+
+        <section id="step5" class="card staged-card staged-accordion collapsed">
+          <button type="button" class="step-toggle" data-step-target="5"><span class="step-toggle-meta">Step 5</span><span class="step-toggle-title">Pick-Up or Delivery</span></button>
+          <div class="staged-body">
+            <h2 class="step-title">Pick-Up or Delivery</h2>
+            <div class="split-choice">
+              <button type="button" id="fulfillmentPickup" class="choice-card">
+                <strong>Pick Up</strong>
+                <p class="small muted">See how far you are from the pick up location.</p>
+                <div><span id="pickupName"></span></div>
+                <div id="pickupAddress" class="small"></div>
+              </button>
+              <button type="button" id="fulfillmentDelivery" class="choice-card">
+                <strong>Delivery</strong>
+                <p class="small muted">Get a quick delivery quote by adding your drop off address here.</p>
+                <div class="small">Live quote with address autocomplete.</div>
+              </button>
+            </div>
+            <div id="deliveryFields" class="hidden" style="margin-top:16px; display:grid; gap:14px;">
+              <div class="form-row">
+                <label>Delivery address</label>
+                <div class="address-autocomplete">
+                  <input id="deliveryAddress" name="deliveryAddress" autocomplete="street-address" placeholder="Start typing your drop off address" />
+                  <div id="deliveryAddressSuggestions" class="address-suggestions hidden"></div>
+                </div>
+                <div id="deliveryLookupStatus" class="small muted" style="margin-top:6px;"></div>
+              </div>
+              <input id="estimatedMiles" name="estimatedMiles" type="hidden" value="0" />
+              <div class="review-flag-box delivery-review-box">
+                <div class="delivery-review-copy">
+                  <div class="delivery-review-fee-row"><span>Estimated delivery fee</span><strong id="deliveryFeeInline">$0.00</strong></div>
+                  <div id="deliveryEstimateInline" class="small muted"></div>
+                  <label class="review-flag-check">
+                    <input id="deliveryReviewFlag" name="deliveryReviewFlag" type="checkbox" />
+                    <span><strong>Does this estimation look incorrect?</strong> Mark it for review!</span>
+                  </label>
+                </div>
+              </div>
+            </div>
+            <div class="step-actions"><button type="button" id="nextStep5" class="btn btn-primary">Next</button></div>
+          </div>
+        </section>
+
+        <section id="step6" class="card staged-card staged-accordion collapsed">
+          <button type="button" class="step-toggle" data-step-target="6"><span class="step-toggle-meta">Step 6</span><span class="step-toggle-title">Communication Preference</span></button>
+          <div class="staged-body">
+            <h2 class="step-title">Communication Preference</h2>
+            <div class="form-row two">
+              <div class="form-row"><label>First Name <span class="required-mark">*</span></label><input id="firstName" name="firstName" required aria-required="true" /></div>
+              <div class="form-row"><label>Last Name <span class="required-mark">*</span></label><input id="lastName" name="lastName" required aria-required="true" /></div>
+            </div>
+            <div class="form-row">
+              <label>How should we contact you?</label>
+              <div class="contact-options" id="contactChecks"></div>
+            </div>
+            <div id="contactInputs" style="margin-top:14px; display:grid; gap:12px;"></div>
+            <div class="step-actions"><button type="button" id="reviewInquiry" class="btn btn-primary" disabled>Review</button></div>
+          </div>
+        </section>
+      </div>
+
+      <section id="reviewSection" class="card review-card hidden">
+        <div class="section-header"><div><strong>Review your request</strong></div></div>
+        <div id="reviewContent"></div>
+        <div class="step-actions">
+          <button type="button" id="backToContact" class="btn btn-secondary">Back</button>
+          <button type="submit" id="submitInquiry" class="btn btn-primary hidden" disabled aria-hidden="true">Submit</button>
+        </div>
+      </section>
+      <input type="hidden" id="imageData" name="imageData" value="">
+    </form>
+
+    <div id="responseMessage" class="hidden"></div>
+  </div>
+
+  <script type="module" src="../assets/js/app-quick.js"></script>
+</body>
+</html>

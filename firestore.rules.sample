@@ -1,0 +1,36 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    match /orders/{orderId} {
+      allow read: if signedIn();
+      allow create: if true; // public quick picker inquiry
+      allow update, delete: if signedIn();
+    }
+
+    match /inventory/{id} {
+      allow read: if true;
+      allow write: if signedIn();
+    }
+
+    match /settings/{id} {
+      allow read: if true;
+      allow write: if signedIn();
+    }
+
+    match /orderAuditLog/{id} {
+      allow read: if signedIn();
+      allow create: if signedIn();
+      allow update, delete: if false;
+    }
+
+    match /orderSnapshots/{id} {
+      allow read: if signedIn();
+      allow create: if signedIn();
+      allow update, delete: if false;
+    }
+  }
+}
