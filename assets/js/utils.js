@@ -6,7 +6,7 @@ export const CONTACT_METHODS = [
 ];
 
 export const ORDER_STATUSES = ['Pending', 'Confirmed', 'In-Progress', 'Completed'];
-export const PAYMENT_STATUSES = ['Un-Paid', 'Paid', 'Free'];
+export const PAYMENT_STATUSES = ['Un-Paid', 'Deposit', 'Paid', 'Free'];
 export const FULFILLMENT_TYPES = ['Pickup', 'Delivery'];
 
 export function uid(prefix = 'id') {
@@ -22,13 +22,19 @@ export function currency(value = 0) {
 
 export function parseDateTime(date, time) {
   if (!date) return null;
-  const safeTime = time || '00:00';
+  const safeTime = /^\d{2}:\d{2}$/.test(String(time || '').trim()) ? String(time).trim() : '00:00';
   return new Date(`${date}T${safeTime}:00`);
 }
 
 export function formatDateTime(date, time) {
+  if (!date) return 'Not set';
   const d = parseDateTime(date, time);
-  if (!d || Number.isNaN(d.getTime())) return 'Not set';
+  const dateText = d && !Number.isNaN(d.getTime())
+    ? new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric' }).format(d)
+    : date;
+  const rawTime = String(time || '').trim();
+  if (!rawTime) return `${dateText} · To Be Determined`;
+  if (!/^\d{2}:\d{2}$/.test(rawTime)) return `${dateText} · ${rawTime}`;
   return new Intl.DateTimeFormat('en-US', {
     month: 'short',
     day: 'numeric',

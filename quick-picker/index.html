@@ -11,7 +11,7 @@
     <div id="mobileTotalBar" class="mobile-total-bar" aria-hidden="false">
       <div class="mobile-total-left">
         <strong>Quick Picker</strong>
-        <span id="mobileStepCount" class="mobile-step-count">Step 1/6 • Exchange Date and Time</span>
+        <span id="mobileStepCount" class="mobile-step-count">Step 1/6 • Event Date and Time</span>
       </div>
       <div id="mobileTotalWrap" class="mobile-total-right">
         <span>Estimated total</span>
@@ -22,21 +22,33 @@
     <form id="pickerForm" class="picker-layout staged-layout">
       <div class="picker-grid" id="pickerStepsWrap">
         <section id="step1" class="card staged-card staged-accordion open">
-          <button type="button" class="step-toggle" data-step-target="1"><span class="step-toggle-meta">Step 1</span><span class="step-toggle-title">Exchange Date and Time</span></button>
+          <button type="button" class="step-toggle" data-step-target="1"><span class="step-toggle-meta">Step 1</span><span class="step-toggle-title">Event Date and Time</span></button>
           <div class="staged-body">
-            <h1 class="step-title">Exchange Date and Time</h1>
+            <h1 class="step-title">Event Date and Time</h1>
             <div class="form-row two">
-              <div class="form-row"><label>Receive date</label><input id="receiveDate" type="date" required /></div>
-              <div class="form-row"><label>Receive time</label><input id="receiveTime" type="time" required /></div>
+              <div class="form-row"><label>Event date</label><input id="eventDate" type="date" required /></div>
+              <div class="form-row"><label>Event time</label><input id="eventTime" type="time" required /></div>
             </div>
+            <div class="form-row">
+              <label>What is the event? <span class="muted small">Optional</span></label>
+              <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+                <input id="eventName" type="text" placeholder="Birthday party, wedding, school event..." style="flex:1 1 260px;" />
+                <button type="button" id="eventNameSkip" class="btn btn-ghost btn-small">No thank you</button>
+              </div>
+            </div>
+            <div class="note-block small">Exchange will auto-fill to the day before your event, and return will auto-fill to the day after. You can still change them below.</div>
             <div class="step-actions"><button type="button" id="nextStep1" class="btn btn-primary">Next</button></div>
           </div>
         </section>
 
         <section id="step2" class="card staged-card staged-accordion collapsed">
-          <button type="button" class="step-toggle" data-step-target="2"><span class="step-toggle-meta">Step 2</span><span class="step-toggle-title">Return Date and Time</span></button>
+          <button type="button" class="step-toggle" data-step-target="2"><span class="step-toggle-meta">Step 2</span><span class="step-toggle-title">Exchange and Return</span></button>
           <div class="staged-body">
-            <h2 class="step-title">Return Date and Time</h2>
+            <h2 class="step-title">Exchange and Return</h2>
+            <div class="form-row two">
+              <div class="form-row"><label>Exchange date</label><input id="receiveDate" type="date" required /></div>
+              <div class="form-row"><label>Exchange time</label><input id="receiveTime" type="time" required /></div>
+            </div>
             <div class="form-row two">
               <div class="form-row"><label>Return date</label><input id="returnDate" type="date" required /></div>
               <div class="form-row"><label>Return time</label><input id="returnTime" type="time" required /></div>

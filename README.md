@@ -107,3 +107,11 @@ Open Admin > Settings and fill in:
 
 Recommended EmailJS template variables to use in your template:
 `to_email`, `from_name`, `business_name`, `customer_name`, `exchange_datetime`, `return_datetime`, `fulfillment_type`, `delivery_address`, `delivery_miles`, `delivery_fee`, `subtotal`, `total`, `contacts_text`, `items_text`, `delivery_text`, `message`, `inquiry_id`
+
+
+## Google Maps setup
+
+1. In Google Cloud, enable **Maps JavaScript API** and **Places API (New)** for your project.
+2. Create a browser API key and restrict it to your GitHub Pages domain or custom domain.
+3. Paste the key into **Admin → Settings → Google Maps API Key** and save.
+4. The site will use Google for autocomplete, geocoding, and delivery distance when the key is present. If Google is unavailable, it falls back to the older free provider.

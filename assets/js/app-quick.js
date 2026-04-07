@@ -1,6 +1,6 @@
 import { getCategories, getInventory, getOrders, getSettings, saveOrders } from './store.js';
 import { CONTACT_METHODS, addDays, buildContactMap, currency, deliveryFeeFromMiles, overlaps, parseDateTime, safeText, uid, formatShortDate, formatDateTime } from './utils.js';
-import { computeDeliveryEstimate, debounce, geocodeAddress, searchAddresses } from './geo.js';
+import { attachGooglePlaceAutocomplete, computeDeliveryEstimate, debounce, geocodeAddress, searchAddresses } from './geo.js';
 import { sendInquiryNotification } from './email-notify.js';
 
 const state = {
@@ -8,6 +8,9 @@ const state = {
   orders: [],
   settings: {},
   selectedCategories: new Set(),
+  eventDate: '',
+  eventTime: '12:00',
+  eventName: '',
   receiveDate: '',
   receiveTime: '10:00',
   returnDate: '',
@@ -29,10 +32,15 @@ const state = {
   submitted: false,
   summaryVisible: false,
   reviewReady: false,
-  notificationResult: null
+  notificationResult: null,
+  googleDeliveryWidgetReady: false,
+  lastSubmittedOrder: null
 };
 
 const els = {};
+
+const DEPOSIT_THRESHOLD = 100;
+const DEPOSIT_RATE = 0.35;
 
 function enforceAccordionState() {
   const sections = [1, 2, 3, 4, 5, 6]
@@ -49,6 +57,18 @@ function formatDistanceTag(match) {
   return Number.isFinite(match?.distanceFromOriginMiles)
     ? `${match.distanceFromOriginMiles.toFixed(1)} mi from pickup`
     : '';
+}
+
+function roundMoney(value) {
+  return Math.round(Number(value || 0) * 100) / 100;
+}
+
+function requiresDeposit(total = 0) {
+  return Number(total || 0) > DEPOSIT_THRESHOLD;
+}
+
+function getDepositAmount(total = 0) {
+  return requiresDeposit(total) ? roundMoney(Number(total || 0) * DEPOSIT_RATE) : 0;
 }
 
 function hideDeliverySuggestions() {
@@ -129,6 +149,7 @@ document.addEventListener('DOMContentLoaded', () => { init().catch(console.error
 async function init() {
   cacheEls();
   await loadData();
+  await initGoogleDeliveryAutocomplete();
   setDefaultDates();
   state.step = 1;
   state.reviewReady = false;
@@ -170,6 +191,10 @@ function cacheEls() {
     nextStep4: document.getElementById('nextStep4'),
     nextStep5: document.getElementById('nextStep5'),
     categoryChips: document.getElementById('categoryChips'),
+    eventDate: document.getElementById('eventDate'),
+    eventTime: document.getElementById('eventTime'),
+    eventName: document.getElementById('eventName'),
+    eventNameSkip: document.getElementById('eventNameSkip'),
     receiveDate: document.getElementById('receiveDate'),
     receiveTime: document.getElementById('receiveTime'),
     returnDate: document.getElementById('returnDate'),
@@ -211,54 +236,99 @@ async function loadData() {
 
 function setDefaultDates() {
   const today = new Date();
-  today.setDate(today.getDate() + 1);
-  state.receiveDate = today.toISOString().slice(0, 10);
-  state.returnDate = addDays(state.receiveDate, 1);
+  today.setDate(today.getDate() + 2);
+  state.eventDate = today.toISOString().slice(0, 10);
+  state.eventTime = '12:00';
+  state.receiveDate = addDays(state.eventDate, -1);
+  state.returnDate = addDays(state.eventDate, 1);
+}
+
+async function initGoogleDeliveryAutocomplete() {
+  if (!els.deliveryAddress) return;
+  if (!state.settings?.googleMapsApiKey) {
+    state.googleDeliveryWidgetReady = false;
+    return;
+  }
+  try {
+    await attachGooglePlaceAutocomplete(els.deliveryAddress, {
+      context: state.settings || null,
+      placeholder: 'Start typing your drop off address',
+      onSelect: async (match) => {
+        state.deliveryAddress = match.label;
+        state.deliveryCoords = Number.isFinite(match.lat) && Number.isFinite(match.lon)
+          ? { lat: match.lat, lon: match.lon }
+          : null;
+        state.deliveryLookupStatus = 'Calculating delivery distance…';
+        renderFulfillment();
+        await resolveDeliveryAddress(match.label, match);
+      }
+    });
+    state.googleDeliveryWidgetReady = true;
+    state.deliveryLookupStatus = '';
+    hideDeliverySuggestions();
+  } catch (error) {
+    state.googleDeliveryWidgetReady = false;
+    state.deliveryLookupStatus = error?.message || 'Autocomplete is unavailable right now.';
+  }
 }
 
 function bindEvents() {
+  els.eventDate.value = state.eventDate;
+  els.eventTime.value = state.eventTime;
+  els.eventName.value = state.eventName;
+  els.eventDate.value = state.eventDate;
+  els.eventTime.value = state.eventTime;
+  els.eventName.value = state.eventName;
   els.receiveDate.value = state.receiveDate;
   els.receiveTime.value = state.receiveTime;
   els.returnDate.value = state.returnDate;
   els.returnTime.value = state.returnTime;
 
+  els.eventDate.addEventListener('input', onEventInput);
+  els.eventTime.addEventListener('input', onEventInput);
+  els.eventName.addEventListener('input', () => { state.eventName = els.eventName.value.trim(); renderSummary(); });
+  els.eventNameSkip?.addEventListener('click', () => { state.eventName = ''; els.eventName.value = ''; advanceTo(2); });
   els.receiveDate.addEventListener('input', onReceiveInput);
   els.receiveTime.addEventListener('input', onReceiveInput);
   els.returnDate.addEventListener('input', onReturnInput);
   els.returnTime.addEventListener('input', onReturnInput);
 
-  const debouncedDeliveryLookup = debounce((query) => lookupDeliverySuggestions(query), 280);
-  els.deliveryAddress.addEventListener('input', () => {
-    state.deliveryAddress = els.deliveryAddress.value.trim();
-    state.deliveryCoords = null;
-    state.deliveryEstimateSource = '';
-    state.deliveryLookupStatus = state.deliveryAddress ? 'Looking up suggestions…' : '';
-    debouncedDeliveryLookup(state.deliveryAddress);
-    renderFulfillment();
-    renderSummary();
-    renderActionStates();
-  });
-  els.deliveryAddress.addEventListener('focus', () => {
-    if (state.deliverySuggestions.length) renderDeliverySuggestions(state.deliverySuggestions);
-  });
-  els.deliveryAddress.addEventListener('blur', () => {
-    window.setTimeout(() => hideDeliverySuggestions(), 160);
-  });
-  els.deliveryAddress.addEventListener('change', () => {
-    const typed = els.deliveryAddress.value.trim();
-    state.deliveryAddress = typed;
-    resolveDeliveryAddress(typed);
-  });
-  els.deliveryAddressSuggestions?.addEventListener('click', (event) => {
-    const button = event.target.closest('[data-delivery-suggestion]');
-    if (!button) return;
-    const match = state.deliverySuggestions[Number(button.dataset.deliverySuggestion)];
-    selectDeliverySuggestion(match);
-  });
-  document.addEventListener('click', (event) => {
-    if (event.target === els.deliveryAddress || els.deliveryAddressSuggestions?.contains(event.target)) return;
+  if (!state.googleDeliveryWidgetReady) {
+    const debouncedDeliveryLookup = debounce((query) => lookupDeliverySuggestions(query), 280);
+    els.deliveryAddress.addEventListener('input', () => {
+      state.deliveryAddress = els.deliveryAddress.value.trim();
+      state.deliveryCoords = null;
+      state.deliveryEstimateSource = '';
+      state.deliveryLookupStatus = state.deliveryAddress ? 'Looking up suggestions…' : '';
+      debouncedDeliveryLookup(state.deliveryAddress);
+      renderFulfillment();
+      renderSummary();
+      renderActionStates();
+    });
+    els.deliveryAddress.addEventListener('focus', () => {
+      if (state.deliverySuggestions.length) renderDeliverySuggestions(state.deliverySuggestions);
+    });
+    els.deliveryAddress.addEventListener('blur', () => {
+      window.setTimeout(() => hideDeliverySuggestions(), 160);
+    });
+    els.deliveryAddress.addEventListener('change', () => {
+      const typed = els.deliveryAddress.value.trim();
+      state.deliveryAddress = typed;
+      resolveDeliveryAddress(typed);
+    });
+    els.deliveryAddressSuggestions?.addEventListener('click', (event) => {
+      const button = event.target.closest('[data-delivery-suggestion]');
+      if (!button) return;
+      const match = state.deliverySuggestions[Number(button.dataset.deliverySuggestion)];
+      selectDeliverySuggestion(match);
+    });
+    document.addEventListener('click', (event) => {
+      if (event.target === els.deliveryAddress || els.deliveryAddressSuggestions?.contains(event.target)) return;
+      hideDeliverySuggestions();
+    });
+  } else {
     hideDeliverySuggestions();
-  });
+  }
   if (els.deliveryReviewFlag) els.deliveryReviewFlag.addEventListener('change', renderSummary);
   els.firstName.addEventListener('input', renderActionStates);
   els.lastName.addEventListener('input', renderActionStates);
@@ -326,12 +396,12 @@ async function lookupDeliverySuggestions(query) {
     if (token !== state.deliveryLookupToken) return;
     renderDeliverySuggestions(matches);
     state.deliveryLookupStatus = matches.length
-      ? 'Choose a suggestion below. Nearby matches are pushed to the top.'
+      ? 'Choose a Google suggestion below.'
       : 'No suggestions found yet. You can still type manually and edit miles yourself.';
   } catch (error) {
     if (token !== state.deliveryLookupToken) return;
     renderDeliverySuggestions([]);
-    state.deliveryLookupStatus = 'Autocomplete is unavailable right now. You can still enter the address manually and edit miles.';
+    state.deliveryLookupStatus = error?.message || 'Google address autocomplete is unavailable right now.';
   }
   renderFulfillment();
 }
@@ -349,14 +419,14 @@ async function resolveDeliveryAddress(query, preselectedMatch = null) {
     renderFulfillment();
     const destination = preselectedMatch || await geocodeAddress(text, { origin: state.settings?.pickupCoords || null, context: state.settings || null });
     if (!destination) {
-      state.deliveryLookupStatus = 'Address not matched. You can keep the typed address and enter miles manually.';
+      state.deliveryLookupStatus = 'Address not matched by Google. You can keep the typed address and enter miles manually.';
       renderFulfillment();
       return;
     }
     state.deliveryAddress = destination.label;
     state.deliveryCoords = { lat: destination.lat, lon: destination.lon };
     els.deliveryAddress.value = destination.label;
-    const estimate = await computeDeliveryEstimate(state.settings.pickupCoords, state.deliveryCoords);
+    const estimate = await computeDeliveryEstimate(state.settings.pickupCoords, state.deliveryCoords, state.settings || null);
     state.estimatedMiles = Number(estimate.roundTripMiles.toFixed(1));
     els.estimatedMiles.value = state.estimatedMiles;
     state.deliveryEstimateSource = estimate.source;
@@ -369,6 +439,19 @@ async function resolveDeliveryAddress(query, preselectedMatch = null) {
   renderFulfillment();
   renderSummary();
   renderActionStates();
+}
+
+function onEventInput() {
+  state.eventDate = els.eventDate.value;
+  state.eventTime = els.eventTime.value;
+  if (state.eventDate) {
+    state.receiveDate = addDays(state.eventDate, -1);
+    state.returnDate = addDays(state.eventDate, 1);
+    els.receiveDate.value = state.receiveDate;
+    els.returnDate.value = state.returnDate;
+  }
+  state.availabilityOffset = 0;
+  render();
 }
 
 function onReceiveInput() {
@@ -430,6 +513,10 @@ els.mobileTotalBar.classList.toggle('hidden', state.submitted);
     const emailNote = state.notificationResult?.status === 'sent'
       ? '<div class="small muted" style="margin-top:10px;">An email notification was also sent to the business inbox.</div>'
       : '';
+    const submittedTotal = Number(state.lastSubmittedOrder?.total || 0);
+    const depositNote = requiresDeposit(submittedTotal)
+      ? `<div class="note-block" style="margin-top:12px;">Orders over ${currency(DEPOSIT_THRESHOLD)} require a 35% deposit. Your required deposit for this request is <strong>${currency(getDepositAmount(submittedTotal))}</strong>.</div>`
+      : '';
     els.responseMessage.innerHTML = `
       <section class="card staged-card thanks-card">
         <div class="eyebrow">Inquiry Sent</div>
@@ -437,6 +524,8 @@ els.mobileTotalBar.classList.toggle('hidden', state.submitted);
         <div class="note-block">
           Please remember that this order is pending until confirmed. Someone from our team will reach out to you as soon as possible to confirm everything. Dates and times chosen are subject to negotiation based on availability!
         </div>
+        ${state.lastSubmittedOrder?.eventName ? `<div class="small muted" style="margin-top:10px;"><strong>Event:</strong> ${safeText(state.lastSubmittedOrder.eventName)}</div>` : ''}
+        ${depositNote}
         ${emailNote}
         <div class="step-actions step-actions-left">
           <button type="button" id="placeAnotherOrder" class="btn btn-primary">Place another order!</button>
@@ -463,8 +552,8 @@ function renderSections() {
   });
   if (els.mobileStepCount) {
     const names = {
-      1: 'Exchange Date and Time',
-      2: 'Return Date and Time',
+      1: 'Event Date and Time',
+      2: 'Exchange and Return',
       3: 'Category Selection',
       4: 'Equipment Selection',
       5: 'Pick-Up or Delivery',
@@ -530,7 +619,7 @@ function getVisibleInventory() {
 }
 
 function hasReceiveSelection() {
-  return Boolean(state.receiveDate && state.receiveTime);
+  return Boolean(state.eventDate && state.eventTime);
 }
 
 function hasValidReturnRange() {
@@ -886,6 +975,8 @@ function renderReviewSection() {
   els.reviewContent.innerHTML = `
     <div class="kv">
       <div class="kv-row"><span>Name</span><strong>${safeText((els.firstName.value || '').trim())} ${safeText((els.lastName.value || '').trim())}</strong></div>
+      <div class="kv-row"><span>Event</span><strong>${safeText(state.eventName || 'No event provided')}</strong></div>
+      <div class="kv-row"><span>Event date</span><strong>${safeText(formatDateTime(state.eventDate, state.eventTime))}</strong></div>
       <div class="kv-row"><span>Exchange</span><strong>${safeText(formatDateTime(state.receiveDate, state.receiveTime))}</strong></div>
       <div class="kv-row"><span>Return</span><strong>${safeText(formatDateTime(state.returnDate, state.returnTime))}</strong></div>
       <div class="kv-row"><span>Fulfillment</span><strong>${safeText(state.fulfillmentType || '--')}</strong></div>
@@ -972,7 +1063,11 @@ async function handleSubmit(event) {
     status: 'Pending',
     paymentStatus: 'Un-Paid',
     fulfillmentType: state.fulfillmentType,
+    verbalConfirmation: false,
     address: state.fulfillmentType === 'Delivery' ? (form.get('deliveryAddress') || '').trim() : '',
+    eventDate: state.eventDate,
+    eventTime: state.eventTime,
+    eventName: state.eventName,
     exchangeDate: state.receiveDate,
     exchangeTime: state.receiveTime,
     returnDate: state.returnDate,
@@ -985,6 +1080,8 @@ async function handleSubmit(event) {
     pickupCoordsSnapshot: state.fulfillmentType === 'Delivery' ? (state.settings.pickupCoords || null) : null,
     addressSnapshot: state.fulfillmentType === 'Delivery' ? state.deliveryAddress : '',
     total,
+    requiresDeposit: requiresDeposit(total),
+    depositAmount: getDepositAmount(total),
     items,
     contactMethods: contactMap,
     createdAt: new Date().toISOString(),
@@ -1013,6 +1110,7 @@ async function handleSubmit(event) {
     console.error('Inquiry email notification failed:', error);
   }
   await saveOrders(orders, { actor: 'quick-picker-notify' });
+  state.lastSubmittedOrder = order;
   state.submitted = true;
   renderSubmittedState();
   window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -1021,6 +1119,7 @@ async function handleSubmit(event) {
 function resetAfterSubmit() {
   els.pickerForm.reset();
   state.selectedCategories = new Set();
+  state.eventName = '';
   state.selectedItems = {};
   state.selectedAccessories = {};
   state.selectedContactMethods = [];
@@ -1038,8 +1137,12 @@ function resetAfterSubmit() {
   state.step = 1;
   state.submitted = false;
   state.summaryVisible = false;
+  state.lastSubmittedOrder = null;
   if (els.deliveryReviewFlag) els.deliveryReviewFlag.checked = false;
   setDefaultDates();
+  els.eventDate.value = state.eventDate;
+  els.eventTime.value = state.eventTime;
+  els.eventName.value = state.eventName;
   els.receiveDate.value = state.receiveDate;
   els.receiveTime.value = state.receiveTime;
   els.returnDate.value = state.returnDate;

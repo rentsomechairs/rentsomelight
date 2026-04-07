@@ -112,7 +112,7 @@ async function lookupSuggestions(query) {
   const token = ++state.lookupToken;
   if (text.length < 3) {
     renderSuggestions([]);
-    els.checkerStatus.textContent = text ? 'Keep typing for local address suggestions.' : '';
+    els.checkerStatus.textContent = text ? 'Keep typing for address suggestions.' : '';
     return;
   }
   if (!state.settings?.pickupCoords?.lat || !state.settings?.pickupCoords?.lon) {
@@ -130,7 +130,7 @@ async function lookupSuggestions(query) {
     renderSuggestions(matches);
     els.checkerStatus.textContent = matches.length
       ? 'Choose a suggestion below or finish typing the full address.'
-      : 'No nearby match yet. Keep typing the street name.';
+      : 'No suggestions found yet. Keep typing the full address.';
   } catch (error) {
     if (token !== state.lookupToken) return;
     renderSuggestions([]);
@@ -157,11 +157,10 @@ async function resolveAddress(query) {
     els.checkerStatus.textContent = 'Calculating delivery estimate…';
     const match = await geocodeAddress(text, {
       origin: state.settings.pickupCoords,
-      context: state.settings,
-      maxDistanceMiles: 100
+      context: state.settings
     });
     if (!match) {
-      els.checkerStatus.textContent = 'No nearby match found yet. Keep typing the full address.';
+      els.checkerStatus.textContent = 'Address not found yet. Keep typing the full address.';
       return;
     }
     await applyEstimate(match);

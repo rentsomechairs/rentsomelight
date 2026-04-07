@@ -58,20 +58,35 @@
           </div>
           <button class="btn btn-primary" id="addOrderBtn">Add Order</button>
         </div>
-        <div class="columns">
-          <div class="column">
-            <h3>Pending Orders</h3>
-            <div id="pendingTotal" class="badge badge-yellow" style="margin:0 0 10px 0; display:inline-flex;"></div>
+        <div class="collapsed-columns-rail" id="collapsedColumnsRail"></div>
+        <div class="columns columns-orders" id="ordersColumns">
+          <div class="column column-side" id="pendingColumn" data-column="pending">
+            <div class="column-head">
+              <div class="column-head-title">
+                <h3>Pending Orders</h3>
+                <div id="pendingTotal" class="badge badge-yellow inline-total"></div>
+              </div>
+              <button class="btn btn-ghost btn-small" type="button" data-toggle-column="pending">Collapse</button>
+            </div>
             <div id="pendingList" class="order-list"></div>
           </div>
-          <div class="column">
-            <h3>Confirmed Orders</h3>
-            <div id="confirmedTotal" class="badge badge-blue" style="margin:0 0 10px 0; display:inline-flex;"></div>
+          <div class="column column-main" id="confirmedColumn" data-column="confirmed">
+            <div class="column-head">
+              <div class="column-head-title">
+                <h3>Confirmed Orders</h3>
+                <div id="confirmedTotal" class="badge badge-blue inline-total"></div>
+              </div>
+            </div>
             <div id="confirmedList" class="order-list"></div>
           </div>
-          <div class="column">
-            <h3>Completed Orders</h3>
-            <div id="completedTotal" class="badge badge-green" style="margin:0 0 10px 0; display:inline-flex;"></div>
+          <div class="column column-side" id="completedColumn" data-column="completed">
+            <div class="column-head">
+              <div class="column-head-title">
+                <h3>Completed Orders</h3>
+                <div id="completedTotal" class="badge badge-green inline-total"></div>
+              </div>
+              <button class="btn btn-ghost btn-small" type="button" data-toggle-column="completed">Collapse</button>
+            </div>
             <div id="completedList" class="order-list"></div>
           </div>
         </div>
@@ -120,8 +135,9 @@
             <div class="form-row"><label>EmailJS Public Key</label><input name="emailjsPublicKey" placeholder="public_xxxxx" /></div>
             <div class="form-row"><label>EmailJS Service ID</label><input name="emailjsServiceId" placeholder="service_xxxxx" /></div>
             <div class="form-row"><label>EmailJS Template ID</label><input name="emailjsTemplateId" placeholder="template_xxxxx" /></div>
+            <div class="form-row"><label>Google Maps API Key</label><input name="googleMapsApiKey" placeholder="AIza..." /></div>
           </div>
-          <div class="small muted" style="margin-top:10px;">Address search powered by OpenStreetMap. Pickup coordinates are saved with settings for delivery quotes.</div>
+          <div class="small muted" style="margin-top:10px;">Address autocomplete uses Google Maps when a Google Maps API key is saved here. If the key is blank or fails, it falls back to OpenStreetMap. Restrict your key to your site domain in Google Cloud.</div>
           <div style="margin-top:16px; display:flex; gap:10px; align-items:center;">
             <button class="btn btn-primary" type="submit">Save Settings</button>
             <span id="settingsSaved" class="small badge badge-green"></span>
@@ -151,29 +167,53 @@
       <form id="orderForm" class="form-grid">
         <div class="form-row two">
           <div class="form-row"><label>First Name</label><input name="firstName" required /></div>
-          <div class="form-row"><label>Last Name</label><input name="lastName" required /></div>
+          <div class="form-row"><label>Last Name</label><input name="lastName" /></div>
         </div>
         <div class="form-row three">
           <div class="form-row"><label>Status</label><select name="status"> <option>Pending</option><option>Confirmed</option><option>In-Progress</option><option>Completed</option></select></div>
-          <div class="form-row"><label>Payment Status</label><select name="paymentStatus"> <option>Un-Paid</option><option>Paid</option><option>Free</option></select></div>
-          <div class="form-row"><label>Pickup / Delivery</label><select name="fulfillmentType"> <option>Pickup</option><option>Delivery</option></select></div>
+          <div class="form-row"><label>Payment Status</label><select name="paymentStatus"> <option>Un-Paid</option><option>Deposit</option><option>Paid</option><option>Free</option></select></div>
+          <div class="form-row"><label>Pickup / Delivery</label><select name="fulfillmentType"> <option>Pickup</option><option>Delivery</option><option>To Be Determined</option></select></div>
+        </div>
+        <div class="form-row" style="grid-column:1/-1;">
+          <label style="display:flex; gap:10px; align-items:center;"><input type="checkbox" name="verbalConfirmation" /> Verbal Confirmation Received</label>
         </div>
         <div class="form-row two">
+          <div class="form-row"><label>Event Date</label><input type="date" name="eventDate" /></div>
+          <div class="form-row"><label>Event Time</label><input type="text" name="eventTime" list="timeChoices" placeholder="Optional" /></div>
+        </div>
+        <div class="form-row"><label>Event</label><input name="eventName" placeholder="Birthday party, wedding, school event, or leave blank" /></div>
+        <div class="form-row two">
           <div class="form-row"><label>Exchange Date</label><input type="date" name="exchangeDate" required /></div>
-          <div class="form-row"><label>Exchange Time</label><input type="time" name="exchangeTime" required /></div>
+          <div class="form-row"><label>Exchange Time</label><input type="text" name="exchangeTime" list="timeChoices" placeholder="10:00 or To Be Determined" required /></div>
         </div>
         <div class="form-row two">
           <div class="form-row"><label>Return Date</label><input type="date" name="returnDate" required /></div>
-          <div class="form-row"><label>Return Time</label><input type="time" name="returnTime" required /></div>
+          <div class="form-row"><label>Return Time</label><input type="text" name="returnTime" list="timeChoices" placeholder="17:00 or To Be Determined" required /></div>
         </div>
+        <datalist id="timeChoices">
+          <option value="To Be Determined"></option>
+          <option value="08:00"></option>
+          <option value="09:00"></option>
+          <option value="10:00"></option>
+          <option value="11:00"></option>
+          <option value="12:00"></option>
+          <option value="13:00"></option>
+          <option value="14:00"></option>
+          <option value="15:00"></option>
+          <option value="16:00"></option>
+          <option value="17:00"></option>
+          <option value="18:00"></option>
+        </datalist>
         <div class="form-row two">
           <div class="form-row"><label>Address</label><input name="address" placeholder="Delivery address if needed" /></div>
           <div class="form-row"><label>Estimated Round Trip Miles</label><input type="number" step="0.1" min="0" name="deliveryMiles" /></div>
         </div>
-        <div class="form-row two">
+        <div class="form-row three">
           <div class="form-row"><label>Delivery Fee</label><input type="number" step="0.01" min="0" name="deliveryFee" /></div>
-          <div class="form-row"><label>Total</label><input type="number" step="0.01" min="0" name="total" required /></div>
+          <div class="form-row"><label>Total</label><input type="number" step="0.01" min="0" name="total" readonly /></div>
+          <div class="form-row"><label>Adjusted Total</label><input type="number" step="0.01" min="0" name="adjustedTotal" placeholder="Optional" /></div>
         </div>
+        <div id="orderDiscountPreview" class="small muted"></div>
 
         <div class="card" style="padding:16px;">
           <div class="section-header">

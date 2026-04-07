@@ -1,21 +1,12 @@
+
 const PHOTON_BASE = 'https://photon.komoot.io';
 const OSRM_BASE = 'https://router.project-osrm.org';
 
-const STREET_SUFFIXES = new Set([
-  'st','street','rd','road','dr','drive','ln','lane','ave','avenue','blvd','boulevard','ct','court',
-  'cir','circle','trl','trail','pkwy','parkway','pl','place','way','ter','terrace','hwy','highway',
-  'nw','ne','sw','se','north','south','east','west','northeast','northwest','southeast','southwest'
-]);
-
-const ADDRESSISH_TYPES = new Set(['house','street','road','residential','address']);
-const VAGUE_TYPES = new Set(['county','state','country','city','district','locality']);
+let googleMapsPromise = null;
+let googleAutocompleteSession = { token: null, touchedAt: 0, key: '' };
 
 function compactParts(parts) {
   return parts.filter(Boolean).map((part) => String(part).trim()).filter(Boolean);
-}
-
-function clamp(value, min, max) {
-  return Math.min(Math.max(value, min), max);
 }
 
 function normalizeText(value) {
@@ -26,269 +17,326 @@ function normalizeText(value) {
     .trim();
 }
 
-function tokenize(value) {
-  return normalizeText(value).split(' ').filter(Boolean);
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
 }
 
-function stripStreetSuffixes(tokens = []) {
-  return tokens.filter((token) => !STREET_SUFFIXES.has(token));
+function toGoogleLatLng(value) {
+  return { lat: Number(value.lat), lng: Number(value.lon ?? value.lng) };
 }
 
-function cityLine(props = {}) {
-  return compactParts([
-    props.city,
-    props.county,
-    props.state,
-    props.postcode
-  ]).join(', ');
-}
-
-function streetLine(props = {}) {
-  return compactParts([
-    props.housenumber,
-    props.street,
-    props.name && !props.street ? props.name : ''
-  ]).join(' ');
-}
-
-function mapPhotonFeature(feature, index, origin = null) {
-  const props = feature?.properties || {};
-  const coords = Array.isArray(feature?.geometry?.coordinates) ? feature.geometry.coordinates : [];
-  const lon = Number(coords[0]);
-  const lat = Number(coords[1]);
-  const primaryLine = streetLine(props) || props.name || props.street || '';
-  const secondaryLine = cityLine(props) || compactParts([props.country]).join(', ');
-  const label = compactParts([primaryLine, secondaryLine]).join(', ') || props.name || '';
-  const distanceFromOriginMiles = origin && Number.isFinite(origin.lat) && Number.isFinite(origin.lon)
-    ? haversineMiles(origin, { lat, lon })
-    : null;
-
+function toBBox(origin, miles = 60) {
+  if (!(origin && Number.isFinite(origin.lat) && Number.isFinite(origin.lon))) return null;
+  const latDelta = miles / 69;
+  const lonDelta = miles / (69 * Math.max(Math.cos((Number(origin.lat) * Math.PI) / 180), 0.2));
   return {
-    label,
+    north: Number(origin.lat) + latDelta,
+    south: Number(origin.lat) - latDelta,
+    east: Number(origin.lon) + lonDelta,
+    west: Number(origin.lon) - lonDelta
+  };
+}
+
+function splitLabel(label = '') {
+  const parts = String(label).split(',').map((part) => part.trim()).filter(Boolean);
+  return {
+    primaryLine: parts[0] || String(label || '').trim(),
+    secondaryLine: parts.slice(1).join(', ')
+  };
+}
+
+function getGoogleMapsApiKey(context = null) {
+  return String(context?.googleMapsApiKey || '').trim();
+}
+
+async function ensureGoogleMaps(apiKey) {
+  const key = String(apiKey || '').trim();
+  if (!key) return null;
+  if (window.google?.maps?.importLibrary) return window.google.maps;
+  if (googleMapsPromise) return googleMapsPromise;
+
+  googleMapsPromise = (async () => {
+    // Install the official dynamic library import bootstrap loader.
+    ((g) => {
+      const p = 'The Google Maps JavaScript API';
+      const c = 'google';
+      const l = 'importLibrary';
+      const q = '__ib__';
+      const m = document;
+      const b = window;
+      b[c] = b[c] || {};
+      const d = (b[c].maps = b[c].maps || {});
+      const r = new Set();
+      const e = new URLSearchParams();
+      let h;
+
+      const u = () => h || (h = new Promise((resolve, reject) => {
+        const a = m.createElement('script');
+        e.set('libraries', [...r].join(','));
+        for (const k in g) {
+          e.set(k.replace(/[A-Z]/g, (t) => '_' + t[0].toLowerCase()), g[k]);
+        }
+        e.set('callback', c + '.maps.' + q);
+        a.src = 'https://maps.googleapis.com/maps/api/js?' + e.toString();
+        a.async = true;
+        a.defer = true;
+        a.dataset.googleMapsLoader = 'true';
+        a.onerror = () => reject(new Error(p + ' could not load.'));
+        d[q] = resolve;
+        const nonce = m.querySelector('script[nonce]');
+        if (nonce) a.nonce = nonce.nonce || '';
+        m.head.appendChild(a);
+      }));
+
+      if (d[l]) return;
+      d[l] = (f, ...n) => r.add(f) && u().then(() => d[l](f, ...n));
+    })({
+      key,
+      v: 'weekly'
+    });
+
+    const start = Date.now();
+    while (!window.google?.maps?.importLibrary) {
+      if (Date.now() - start > 8000) {
+        throw new Error('google.maps.importLibrary did not become available.');
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 50));
+    }
+
+    return window.google.maps;
+  })().catch((error) => {
+    googleMapsPromise = null;
+    throw error;
+  });
+
+  return googleMapsPromise;
+}
+
+function getGoogleSessionToken(_placesLib, apiKey) {
+  const now = Date.now();
+  if (!googleAutocompleteSession.token || googleAutocompleteSession.key !== apiKey || now - googleAutocompleteSession.touchedAt > 180000) {
+    googleAutocompleteSession = {
+      token: window.google?.maps?.places?.AutocompleteSessionToken
+        ? new window.google.maps.places.AutocompleteSessionToken()
+        : null,
+      touchedAt: now,
+      key: apiKey
+    };
+  } else {
+    googleAutocompleteSession.touchedAt = now;
+  }
+  return googleAutocompleteSession.token;
+}
+
+async function searchAddressesGoogle(query, { limit = 5, origin = null, context = null, maxDistanceMiles = 100 } = {}) {
+  const apiKey = getGoogleMapsApiKey(context);
+  if (!apiKey) return [];
+  await ensureGoogleMaps(apiKey);
+  await google.maps.importLibrary('places');
+  const text = String(query || '').trim();
+  if (text.length < 3) return [];
+
+  const service = new google.maps.places.AutocompleteService();
+  const request = {
+    input: text,
+    componentRestrictions: { country: 'us' },
+    sessionToken: getGoogleSessionToken(null, apiKey),
+    types: ['address']
+  };
+
+  if (origin && Number.isFinite(origin.lat) && Number.isFinite(origin.lon)) {
+    request.location = new google.maps.LatLng(Number(origin.lat), Number(origin.lon));
+    request.radius = clamp((maxDistanceMiles || 100) * 1609.344, 10000, 160000);
+  }
+
+  const predictions = await new Promise((resolve, reject) => {
+    service.getPlacePredictions(request, (results, status) => {
+      if (status === google.maps.places.PlacesServiceStatus.OK || status === 'OK') {
+        resolve(Array.isArray(results) ? results : []);
+        return;
+      }
+      if (status === google.maps.places.PlacesServiceStatus.ZERO_RESULTS || status === 'ZERO_RESULTS') {
+        resolve([]);
+        return;
+      }
+      reject(new Error(`Autocomplete failed (${status})`));
+    });
+  });
+
+  return predictions.slice(0, limit).map((prediction, index) => {
+    const textValue = prediction?.description || '';
+    const matched = Array.isArray(prediction?.structured_formatting?.main_text_matched_substrings)
+      ? prediction.structured_formatting.main_text_matched_substrings
+      : [];
+    const distanceMiles = Number.isFinite(prediction?.distance_meters)
+      ? Number(prediction.distance_meters) / 1609.344
+      : null;
+    const { primaryLine, secondaryLine } = splitLabel(textValue);
+    return {
+      label: textValue,
+      primaryLine: prediction?.structured_formatting?.main_text || primaryLine,
+      secondaryLine: prediction?.structured_formatting?.secondary_text || secondaryLine,
+      lat: NaN,
+      lon: NaN,
+      placeId: prediction?.place_id || `${textValue}|${index}`,
+      distanceFromOriginMiles: distanceMiles,
+      matchedSubstrings: matched,
+      raw: prediction,
+      provider: 'google'
+    };
+  });
+}
+
+async function geocodeAddressGoogle(query, { origin = null, context = null } = {}) {
+  const apiKey = getGoogleMapsApiKey(context);
+  if (!apiKey) return null;
+  await ensureGoogleMaps(apiKey);
+  const text = String(query || '').trim();
+  if (!text) return null;
+
+  const boundsBox = toBBox(origin, 80);
+  const geocoder = new google.maps.Geocoder();
+  const request = { address: text, region: 'US' };
+  if (boundsBox) {
+    request.bounds = new google.maps.LatLngBounds(
+      { lat: boundsBox.south, lng: boundsBox.west },
+      { lat: boundsBox.north, lng: boundsBox.east }
+    );
+  }
+
+  const result = await new Promise((resolve, reject) => {
+    geocoder.geocode(request, (results, status) => {
+      if (status !== 'OK' || !Array.isArray(results) || !results.length) {
+        reject(new Error(`Geocode failed (${status})`));
+        return;
+      }
+      resolve(results[0]);
+    });
+  });
+
+  const location = result.geometry?.location;
+  const formatted = result.formatted_address || text;
+  const { primaryLine, secondaryLine } = splitLabel(formatted);
+  return {
+    label: formatted,
     primaryLine,
     secondaryLine,
-    lat,
-    lon,
-    placeId: props.osm_id || `${lat}|${lon}|${label}`,
-    distanceFromOriginMiles,
-    raw: feature,
-    rankIndex: index,
-    normPrimary: normalizeText(primaryLine),
-    normSecondary: normalizeText(secondaryLine),
-    normRoad: normalizeText(props.street || props.name || ''),
-    houseNumber: normalizeText(props.housenumber || ''),
-    cityName: normalizeText(props.city || ''),
-    countyName: normalizeText(props.county || ''),
-    stateName: normalizeText(props.state || ''),
-    postcode: normalizeText(props.postcode || ''),
-    countryName: normalizeText(props.country || ''),
-    type: normalizeText(props.type || ''),
-    osmType: normalizeText(props.osm_type || '')
+    lat: Number(location?.lat?.()),
+    lon: Number(location?.lng?.()),
+    placeId: result.place_id || formatted,
+    distanceFromOriginMiles: origin ? haversineMiles(origin, { lat: Number(location?.lat?.()), lon: Number(location?.lng?.()) }) : null,
+    raw: result,
+    provider: 'google'
   };
 }
 
-function distanceScore(miles, profile) {
-  if (!Number.isFinite(miles)) return 0;
-  if (miles <= 2) return 580;
-  if (miles <= 5) return 500;
-  if (miles <= 10) return 400;
-  if (miles <= 20) return 300;
-  if (miles <= 35) return 170;
-  if (miles <= 50) return profile.stage === 'very-short' ? 20 : 90;
-  if (miles <= 75) return profile.stage === 'very-short' ? -320 : -40;
-  if (miles <= 100) return profile.stage === 'very-short' ? -900 : -260;
-  return profile.stage === 'very-short' ? -4000 : -2200;
-}
-
-function getQueryParts(query) {
-  const normalized = normalizeText(query);
-  const tokens = tokenize(normalized);
-  const houseToken = /^\d+[a-z]?$/.test(tokens[0]) ? tokens[0] : '';
-  const streetTokens = stripStreetSuffixes(houseToken ? tokens.slice(1) : tokens);
-  return { normalized, tokens, houseToken, streetTokens };
-}
-
-function getQueryProfile(query) {
-  const { normalized, tokens, houseToken, streetTokens } = getQueryParts(query);
-  const joinedStreet = streetTokens.join(' ');
-  const charCount = normalized.replace(/\s+/g, '').length;
-  const streetCharCount = joinedStreet.replace(/\s+/g, '').length;
-
-  let stage = 'broad';
-  if (charCount <= 5 || (houseToken && streetCharCount <= 2)) stage = 'very-short';
-  else if (streetCharCount <= 5) stage = 'short';
-  else if (streetCharCount <= 8) stage = 'medium';
-
-  return {
-    normalized,
-    tokens,
-    houseToken,
-    streetTokens,
-    joinedStreet,
-    charCount,
-    streetCharCount,
-    looksNearComplete: Boolean(houseToken && streetCharCount >= 8),
-    stage
-  };
-}
-
-function getStageDistanceLimit(profile) {
-  switch (profile.stage) {
-    case 'very-short': return 25;
-    case 'short': return 45;
-    case 'medium': return 90;
-    default: return 180;
-  }
-}
-
-function getStageFallbackDistanceLimit(profile) {
-  switch (profile.stage) {
-    case 'very-short': return 80;
-    case 'short': return 120;
-    case 'medium': return 180;
-    default: return 260;
-  }
-}
-
-function tokenCoverageScore(streetTokens, roadTokens) {
-  if (!streetTokens.length) return 0;
-  let exact = 0;
-  let prefix = 0;
-  streetTokens.forEach((token, idx) => {
-    const roadToken = roadTokens[idx] || '';
-    if (roadToken === token) {
-      exact += 1;
-      return;
-    }
-    if (roadToken.startsWith(token) || token.startsWith(roadToken)) {
-      prefix += 1;
-      return;
-    }
-    if (roadTokens.includes(token)) prefix += 0.5;
-  });
-  return (exact * 1.2) + prefix;
-}
-
-function localityScore(entry, localHints = {}, profile) {
-  const localCity = normalizeText(localHints.city || '');
-  const localCounty = normalizeText(localHints.county || '');
-  const localState = normalizeText(localHints.state || '');
-  const localZip = normalizeText(localHints.postcode || '');
-  let score = 0;
-
-  if (localCity && entry.cityName === localCity) score += 130;
-  if (localCounty && entry.countyName === localCounty) score += 70;
-  if (localState && entry.stateName === localState) score += 55;
-  if (localZip && entry.postcode === localZip) score += 50;
-
-  if (localState && entry.stateName && entry.stateName !== localState) {
-    score -= profile.stage === 'very-short' ? 1400 : profile.stage === 'short' ? 800 : 260;
-  }
-
-  if (entry.countryName && !['united states','usa','us'].includes(entry.countryName)) {
-    score -= profile.stage === 'very-short' ? 2600 : profile.stage === 'short' ? 1600 : 500;
-  }
-
-  return score;
-}
-
-function qualityGatePenalty(entry, profile) {
-  const roadTokens = stripStreetSuffixes(tokenize(entry.normRoad));
-  const joinedRoad = roadTokens.join(' ');
-  let penalty = 0;
-
-  if ((profile.houseToken || profile.streetTokens.length) && !joinedRoad && !ADDRESSISH_TYPES.has(entry.type)) {
-    penalty -= profile.stage === 'very-short' ? 1500 : 500;
-  }
-
-  if (VAGUE_TYPES.has(entry.type)) {
-    penalty -= profile.stage === 'very-short' ? 1700 : 650;
-  }
-
-  if (profile.houseToken && entry.houseNumber && entry.houseNumber !== profile.houseToken) {
-    penalty -= profile.stage === 'very-short' ? 520 : 260;
-  }
-
-  if (profile.streetTokens.length) {
-    const coverage = tokenCoverageScore(profile.streetTokens, roadTokens);
-    const lastToken = profile.streetTokens[profile.streetTokens.length - 1] || '';
-    const lastTokenMatched = lastToken
-      ? roadTokens.some((token) => token.startsWith(lastToken) || lastToken.startsWith(token))
-      : false;
-
-    if (profile.stage === 'very-short' && profile.streetCharCount >= 2 && !lastTokenMatched) penalty -= 900;
-    if (profile.stage === 'short' && profile.streetCharCount >= 3 && coverage < 0.9 && !lastTokenMatched) penalty -= 520;
-    if (profile.stage === 'medium' && coverage < 1.1 && !joinedRoad.includes(profile.joinedStreet)) penalty -= 250;
-    if (profile.looksNearComplete && !joinedRoad.includes(profile.joinedStreet) && coverage < Math.max(1.4, profile.streetTokens.length * 0.75)) penalty -= 300;
-  }
-
-  return penalty;
-}
-
-function scoreResult(entry, query, localHints = {}) {
-  const profile = getQueryProfile(query);
-  const { normalized, tokens, houseToken, streetTokens } = profile;
-  if (!normalized || !tokens.length) return 0;
-
-  const primaryTokens = tokenize(entry.normPrimary);
-  const roadTokens = stripStreetSuffixes(tokenize(entry.normRoad));
-  const haystack = `${entry.normPrimary} ${entry.normSecondary}`.trim();
-  const joinedStreet = streetTokens.join(' ');
-  const joinedRoad = roadTokens.join(' ');
-
-  let score = 0;
-  if (entry.normPrimary.startsWith(normalized)) score += 340;
-  else if (entry.normRoad.startsWith(normalized)) score += 320;
-  else if (haystack.startsWith(normalized)) score += 180;
-  else if (entry.normRoad.includes(normalized)) score += 140;
-  else if (entry.normPrimary.includes(normalized)) score += 110;
-
-  if (houseToken) {
-    if (entry.houseNumber === houseToken) score += 330;
-    else if (primaryTokens[0] === houseToken) score += 120;
-    else score -= profile.stage === 'very-short' ? 500 : 260;
-  }
-
-  if (streetTokens.length) {
-    const coverage = tokenCoverageScore(streetTokens, roadTokens);
-    if (joinedRoad === joinedStreet) score += 650;
-    else if (joinedRoad.startsWith(joinedStreet)) score += 520;
-    else if (joinedRoad.includes(joinedStreet)) score += 300;
-    else if (entry.normPrimary.includes(joinedStreet)) score += 180;
-    else score -= profile.stage === 'very-short' ? 260 : 380;
-
-    score += coverage * (profile.stage === 'very-short' ? 145 : 110);
-
-    const lastToken = streetTokens[streetTokens.length - 1] || '';
-    if (lastToken && roadTokens.length) {
-      const roadJoined = roadTokens.join(' ');
-      if (!roadJoined.includes(lastToken) && !roadTokens.some((token) => token.startsWith(lastToken) || lastToken.startsWith(token))) {
-        score -= profile.stage === 'very-short' ? 340 : 180;
+async function getRoadMilesGoogle(origin, destination, context = null) {
+  const apiKey = getGoogleMapsApiKey(context);
+  if (!apiKey) throw new Error('Google Maps API key missing');
+  await ensureGoogleMaps(apiKey);
+  const service = new google.maps.DistanceMatrixService();
+  const response = await new Promise((resolve, reject) => {
+    service.getDistanceMatrix({
+      origins: [toGoogleLatLng(origin)],
+      destinations: [toGoogleLatLng(destination)],
+      travelMode: google.maps.TravelMode.DRIVING,
+      unitSystem: google.maps.UnitSystem.IMPERIAL,
+      avoidFerries: false,
+      avoidHighways: false,
+      avoidTolls: false
+    }, (result, status) => {
+      if (status !== 'OK') {
+        reject(new Error(`Distance Matrix failed (${status})`));
+        return;
       }
-    }
+      resolve(result);
+    });
+  });
 
-    if (coverage < Math.max(1, streetTokens.length * 0.6)) score -= 180;
-  }
-
-  score += localityScore(entry, localHints, profile);
-  score += qualityGatePenalty(entry, profile);
-  score += distanceScore(entry.distanceFromOriginMiles, profile);
-  return score;
+  const element = response?.rows?.[0]?.elements?.[0];
+  const meters = Number(element?.distance?.value);
+  if (!Number.isFinite(meters)) throw new Error('No route distance returned');
+  return meters / 1609.344;
 }
 
-function rankResults(results, query, origin = null, localHints = {}) {
-  return [...results].sort((a, b) => {
-    const aScore = scoreResult(a, query, localHints);
-    const bScore = scoreResult(b, query, localHints);
-    if (aScore !== bScore) return bScore - aScore;
 
-    if (origin) {
-      const aDist = Number.isFinite(a.distanceFromOriginMiles) ? a.distanceFromOriginMiles : Number.POSITIVE_INFINITY;
-      const bDist = Number.isFinite(b.distanceFromOriginMiles) ? b.distanceFromOriginMiles : Number.POSITIVE_INFINITY;
-      if (Math.abs(aDist - bDist) > 0.05) return aDist - bDist;
-    }
-    return a.rankIndex - b.rankIndex;
+function addressComponent(place, type, short = false) {
+  const comps = Array.isArray(place?.addressComponents)
+    ? place.addressComponents
+    : (Array.isArray(place?.address_components) ? place.address_components : []);
+  const match = comps.find((c) => Array.isArray(c?.types) && c.types.includes(type));
+  if (!match) return '';
+  if ('longText' in match || 'shortText' in match) {
+    return short ? (match.shortText || match.longText || '') : (match.longText || match.shortText || '');
+  }
+  return short ? (match.short_name || match.long_name || '') : (match.long_name || match.short_name || '');
+}
+
+export async function attachGooglePlaceAutocomplete(inputEl, { context = null, placeholder = '', onSelect = null } = {}) {
+  const apiKey = getGoogleMapsApiKey(context);
+  if (!apiKey) throw new Error('Google Maps API key missing. Add it in Admin Settings to use address autocomplete.');
+  if (!inputEl) throw new Error('Address input not found.');
+  await ensureGoogleMaps(apiKey);
+  await google.maps.importLibrary('places');
+  if (!google.maps.places?.Autocomplete) {
+    throw new Error('Places library loaded, but Autocomplete is unavailable. Make sure the Places library is enabled.');
+  }
+
+  if (inputEl.dataset.googleLegacyAutocompleteReady === 'true') return inputEl;
+
+  if (placeholder) inputEl.setAttribute('placeholder', placeholder);
+
+  const autocomplete = new google.maps.places.Autocomplete(inputEl, {
+    componentRestrictions: { country: 'us' },
+    fields: ['formatted_address', 'address_components', 'geometry', 'place_id'],
+    types: ['address']
   });
+
+  const pickup = context?.pickupCoords;
+  if (pickup && Number.isFinite(pickup.lat) && Number.isFinite(pickup.lon)) {
+    const boundsBox = toBBox(pickup, 100);
+    if (boundsBox) {
+      const bounds = new google.maps.LatLngBounds(
+        { lat: boundsBox.south, lng: boundsBox.west },
+        { lat: boundsBox.north, lng: boundsBox.east }
+      );
+      autocomplete.setBounds(bounds);
+      autocomplete.setOptions({ strictBounds: false });
+    }
+  }
+
+  inputEl.dataset.googleLegacyAutocompleteReady = 'true';
+  inputEl.__googleLegacyAutocomplete = autocomplete;
+
+  autocomplete.addListener('place_changed', async () => {
+    const place = autocomplete.getPlace();
+    const formatted = place?.formatted_address || inputEl.value.trim() || '';
+    const fallback = splitLabel(formatted);
+    const streetLine = compactParts([
+      addressComponent(place, 'street_number'),
+      addressComponent(place, 'route')
+    ]).join(' ');
+    const secondaryLine = compactParts([
+      addressComponent(place, 'locality') || addressComponent(place, 'postal_town'),
+      addressComponent(place, 'administrative_area_level_1', true),
+      addressComponent(place, 'postal_code')
+    ]).join(', ');
+    const location = place?.geometry?.location;
+    const match = {
+      label: formatted,
+      primaryLine: streetLine || fallback.primaryLine,
+      secondaryLine: secondaryLine || fallback.secondaryLine,
+      lat: Number(location?.lat?.()),
+      lon: Number(location?.lng?.()),
+      placeId: place?.place_id || formatted,
+      raw: place,
+      provider: 'google'
+    };
+    inputEl.value = formatted;
+    if (typeof onSelect === 'function') await onSelect(match, place);
+  });
+
+  return inputEl;
 }
 
 export function debounce(fn, delay = 250) {
@@ -313,142 +361,96 @@ async function fetchPhoton(query, { limit = 10, origin = null } = {}) {
     mode: 'cors',
     cache: 'no-store'
   });
-  if (!response.ok) {
-    throw new Error(`Address lookup failed (${response.status})`);
-  }
+  if (!response.ok) throw new Error(`Address lookup failed (${response.status})`);
   const payload = await response.json();
   return Array.isArray(payload?.features) ? payload.features : [];
 }
 
-function parsePickupContext(context = {}) {
-  const source = String(context?.pickupGeocodedAddress || context?.pickupAddress || '').trim();
-  if (!source) return { city: '', county: '', state: '', postcode: '' };
+function streetLine(props = {}) {
+  return compactParts([
+    props.housenumber,
+    props.street,
+    props.name && !props.street ? props.name : ''
+  ]).join(' ');
+}
 
-  const normalized = source.replace(/\s+/g, ' ').trim();
-  const zipMatch = normalized.match(/\b\d{5}(?:-\d{4})?\b/);
-  const parts = normalized.split(',').map((part) => part.trim()).filter(Boolean);
+function cityLine(props = {}) {
+  return compactParts([
+    props.city,
+    props.county,
+    props.state,
+    props.postcode
+  ]).join(', ');
+}
 
-  let city = '';
-  let county = '';
-  let state = '';
-  let postcode = zipMatch ? zipMatch[0] : '';
-
-  if (parts.length >= 2) city = parts[parts.length - 3] || parts[parts.length - 2] || '';
-  const countyPart = parts.find((part) => /county/i.test(part));
-  if (countyPart) county = countyPart;
-  for (const part of parts) {
-    const token = part.split(/\s+/).find((t) => /^[A-Z]{2}$/.test(t));
-    if (token) { state = token; break; }
-  }
-
+function mapPhotonFeature(feature, index, origin = null) {
+  const props = feature?.properties || {};
+  const coords = Array.isArray(feature?.geometry?.coordinates) ? feature.geometry.coordinates : [];
+  const lon = Number(coords[0]);
+  const lat = Number(coords[1]);
+  const primaryLine = streetLine(props) || props.name || props.street || '';
+  const secondaryLine = cityLine(props) || compactParts([props.country]).join(', ');
+  const label = compactParts([primaryLine, secondaryLine]).join(', ') || props.name || '';
   return {
-    city: normalizeText(city),
-    county: normalizeText(county),
-    state: normalizeText(state),
-    postcode: normalizeText(postcode)
+    label,
+    primaryLine,
+    secondaryLine,
+    lat,
+    lon,
+    placeId: props.osm_id || `${lat}|${lon}|${label}`,
+    distanceFromOriginMiles: origin && Number.isFinite(origin.lat) && Number.isFinite(origin.lon)
+      ? haversineMiles(origin, { lat, lon })
+      : null,
+    raw: feature,
+    provider: 'photon'
   };
 }
 
-function buildPhotonQueries(text, context = {}) {
-  const clean = String(text || '').trim();
-  const profile = getQueryProfile(clean);
-  const local = parsePickupContext(context);
-  const queries = [];
-
-  if (local.city && local.state) queries.push(`${clean} ${local.city} ${local.state}`);
-  if (local.city) queries.push(`${clean} ${local.city}`);
-  if (local.postcode) queries.push(`${clean} ${local.postcode}`);
-  if (local.state) queries.push(`${clean} ${local.state}`);
-  queries.push(clean);
-
-  if (profile.looksNearComplete && local.city && local.state) {
-    queries.push(`${clean}, ${local.city}, ${local.state}`);
-  }
-
-  return { local, profile, queries: [...new Set(queries)].filter(Boolean) };
-}
-
-function isStronglyLocal(entry, local) {
-  return Boolean(
-    (local.city && entry.cityName === local.city) ||
-    (local.county && entry.countyName === local.county) ||
-    (local.state && entry.stateName === local.state)
-  );
-}
-
-function filterPool(entries, profile, local, origin, explicitMaxDistanceMiles) {
-  if (!(origin && Number.isFinite(origin.lat) && Number.isFinite(origin.lon))) return entries;
-
-  const stageLimit = clamp(Math.min(explicitMaxDistanceMiles || 9999, getStageDistanceLimit(profile)), 5, 500);
-  const stageFallback = clamp(Math.min(explicitMaxDistanceMiles || 9999, getStageFallbackDistanceLimit(profile)), stageLimit, 1000);
-
-  let pool = entries.filter((entry) => {
-    if (entry.countryName && !['united states','usa','us'].includes(entry.countryName)) {
-      return profile.stage === 'broad' && profile.looksNearComplete;
-    }
-    if (local.state && entry.stateName && entry.stateName !== local.state && profile.stage !== 'broad') return false;
-    if (Number.isFinite(entry.distanceFromOriginMiles) && entry.distanceFromOriginMiles > stageFallback) return false;
-    if ((profile.houseToken || profile.streetTokens.length) && VAGUE_TYPES.has(entry.type)) return false;
-    return true;
-  });
-
-  const stronglyLocal = pool.filter((entry) => isStronglyLocal(entry, local));
-  const withinStage = pool.filter((entry) => !Number.isFinite(entry.distanceFromOriginMiles) || entry.distanceFromOriginMiles <= stageLimit);
-  const localWithinStage = withinStage.filter((entry) => isStronglyLocal(entry, local));
-
-  if (localWithinStage.length >= 3) return localWithinStage;
-  if (withinStage.length >= 4) return withinStage;
-  if (stronglyLocal.length >= 3) return stronglyLocal;
-  return pool;
-}
-
-export async function searchAddresses(query, { limit = 5, origin = null, context = null, maxDistanceMiles = 100 } = {}) {
+async function searchAddressesPhoton(query, { limit = 5, origin = null } = {}) {
   const text = String(query || '').trim();
   if (text.length < 3) return [];
-
-  const { local, profile, queries } = buildPhotonQueries(text, context || {});
-  const perQueryLimit = Math.max(limit * 5, 20);
-  const featureBuckets = await Promise.all(
-    queries.map((entry) => fetchPhoton(entry, { limit: perQueryLimit, origin }))
-  );
-  const featureList = featureBuckets.flat();
-
-  const deduped = [];
-  const seen = new Set();
-  featureList.forEach((feature, index) => {
-    const mapped = mapPhotonFeature(feature, index, origin);
-    if (!Number.isFinite(mapped.lat) || !Number.isFinite(mapped.lon)) return;
-    const key = `${mapped.houseNumber}|${mapped.normRoad}|${mapped.cityName}|${mapped.stateName}|${mapped.postcode}|${mapped.lat.toFixed(5)}|${mapped.lon.toFixed(5)}`;
-    if (seen.has(key)) return;
-    seen.add(key);
-    deduped.push(mapped);
-  });
-
-  const pool = filterPool(deduped, profile, local, origin, maxDistanceMiles);
-  const ranked = rankResults(pool, text, origin, local);
-  return ranked.slice(0, limit);
+  const features = await fetchPhoton(text, { limit: Math.max(limit * 4, 12), origin });
+  return features
+    .map((feature, index) => mapPhotonFeature(feature, index, origin))
+    .filter((entry) => Number.isFinite(entry.lat) && Number.isFinite(entry.lon))
+    .sort((a, b) => {
+      const aDist = Number.isFinite(a.distanceFromOriginMiles) ? a.distanceFromOriginMiles : Number.POSITIVE_INFINITY;
+      const bDist = Number.isFinite(b.distanceFromOriginMiles) ? b.distanceFromOriginMiles : Number.POSITIVE_INFINITY;
+      return aDist - bDist;
+    })
+    .slice(0, limit);
 }
 
-export async function geocodeAddress(query, { origin = null, context = null, maxDistanceMiles = 100 } = {}) {
-  const results = await searchAddresses(query, { limit: 1, origin, context, maxDistanceMiles });
-  return results[0] || null;
+export async function searchAddresses(query, options = {}) {
+  const context = options?.context || null;
+  if (getGoogleMapsApiKey(context)) {
+    return searchAddressesGoogle(query, options);
+  }
+  return searchAddressesPhoton(query, options);
+}
+
+export async function geocodeAddress(query, options = {}) {
+  const context = options?.context || null;
+  if (!getGoogleMapsApiKey(context)) {
+    throw new Error('Google Maps API key missing. Add it in Admin Settings to use address matching.');
+  }
+  return geocodeAddressGoogle(query, options);
 }
 
 export function haversineMiles(origin, destination) {
   if (!origin || !destination) return 0;
   const toRad = (value) => (Number(value) * Math.PI) / 180;
   const r = 3958.7613;
-  const dLat = toRad(destination.lat - origin.lat);
-  const dLon = toRad(destination.lon - origin.lon);
+  const dLat = toRad((destination.lat ?? destination.lng) - origin.lat);
+  const dLon = toRad((destination.lon ?? destination.lng) - origin.lon);
   const lat1 = toRad(origin.lat);
-  const lat2 = toRad(destination.lat);
+  const lat2 = toRad(destination.lat ?? destination.lng ?? destination.lat);
   const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return r * c;
 }
 
-export async function getRoadMiles(origin, destination) {
-  if (!origin || !destination) throw new Error('Missing coordinates');
+async function getRoadMilesPhoton(origin, destination) {
   const coords = `${origin.lon},${origin.lat};${destination.lon},${destination.lat}`;
   const url = new URL(`/route/v1/driving/${coords}`, OSRM_BASE);
   url.searchParams.set('overview', 'false');
@@ -462,21 +464,14 @@ export async function getRoadMiles(origin, destination) {
   return meters / 1609.344;
 }
 
-export async function computeDeliveryEstimate(origin, destination) {
-  try {
-    const oneWayMiles = await getRoadMiles(origin, destination);
-    return {
-      oneWayMiles,
-      roundTripMiles: oneWayMiles * 2,
-      source: 'road'
-    };
-  } catch (error) {
-    const fallbackOneWay = haversineMiles(origin, destination);
-    return {
-      oneWayMiles: fallbackOneWay,
-      roundTripMiles: fallbackOneWay * 2,
-      source: 'straight-line',
-      fallbackReason: error?.message || 'Routing unavailable'
-    };
+export async function computeDeliveryEstimate(origin, destination, context = null) {
+  if (!getGoogleMapsApiKey(context)) {
+    throw new Error('Google Maps API key missing. Add it in Admin Settings to calculate delivery distance.');
   }
+  const oneWayMiles = await getRoadMilesGoogle(origin, destination, context);
+  return {
+    oneWayMiles,
+    roundTripMiles: oneWayMiles * 2,
+    source: 'road'
+  };
 }

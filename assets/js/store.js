@@ -29,6 +29,7 @@ const defaultSettings = {
   emailjsPublicKey: '',
   emailjsServiceId: '',
   emailjsTemplateId: '',
+  googleMapsApiKey: '',
   notificationFromName: 'Rent Some Orders',
   pickupCoords: null,
   pickupGeocodedAddress: '',

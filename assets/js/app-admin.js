@@ -13,10 +13,17 @@ const state = {
   imageLibrary: [],
   pickupSuggestions: [],
   pickupLookupToken: 0,
-  orderActionDelegatesBound: false
+  orderActionDelegatesBound: false,
+  collapsedColumns: {
+    pending: false,
+    completed: false
+  }
 };
 
 const els = {};
+
+const DEPOSIT_THRESHOLD = 100;
+const DEPOSIT_RATE = 0.35;
 
 function formatDistanceTag(match) {
   return Number.isFinite(match?.distanceFromOriginMiles)
@@ -230,6 +237,10 @@ function cacheEls() {
     pendingTotal: document.getElementById('pendingTotal'),
     confirmedTotal: document.getElementById('confirmedTotal'),
     completedTotal: document.getElementById('completedTotal'),
+    pendingColumn: document.getElementById('pendingColumn'),
+    confirmedColumn: document.getElementById('confirmedColumn'),
+    completedColumn: document.getElementById('completedColumn'),
+    collapsedColumnsRail: document.getElementById('collapsedColumnsRail'),
     addOrderBtn: document.getElementById('addOrderBtn'),
     addInventoryBtn: document.getElementById('addInventoryBtn'),
     inventoryList: document.getElementById('inventoryList'),
@@ -255,7 +266,12 @@ function cacheEls() {
     backupStatus: document.getElementById('backupStatus'),
     pickupAddressInput: document.getElementById('pickupAddressInput'),
     pickupAddressSuggestions: document.getElementById('pickupAddressSuggestions'),
-    pickupLookupStatus: document.getElementById('pickupLookupStatus')
+    pickupLookupStatus: document.getElementById('pickupLookupStatus'),
+    pendingColumn: document.getElementById('pendingColumn'),
+    confirmedColumn: document.getElementById('confirmedColumn'),
+    completedColumn: document.getElementById('completedColumn'),
+    collapsedColumnsRail: document.getElementById('collapsedColumnsRail'),
+    orderDiscountPreview: document.getElementById('orderDiscountPreview')
   });
 }
 
@@ -285,10 +301,10 @@ function bindLogin() {
     }
     try {
       if (els.pickupLookupStatus) els.pickupLookupStatus.textContent = 'Looking up address…';
-      const matches = await searchAddresses(text, { limit: 6, origin: state.settings?.pickupCoords || null });
+      const matches = await searchAddresses(text, { limit: 6, origin: state.settings?.pickupCoords || null, context: state.settings || null });
       if (token !== state.pickupLookupToken) return;
       renderPickupSuggestions(matches);
-      if (els.pickupLookupStatus) els.pickupLookupStatus.textContent = matches.length ? 'Choose a suggestion below. Nearby matches are pushed to the top.' : 'No suggestions found yet. You can still save the typed address.';
+      if (els.pickupLookupStatus) els.pickupLookupStatus.textContent = matches.length ? (state.settings?.googleMapsApiKey ? 'Choose a Google suggestion below.' : 'Choose a suggestion below. Nearby matches are pushed to the top.') : 'No suggestions found yet. You can still save the typed address.';
     } catch (error) {
       if (token !== state.pickupLookupToken) return;
       renderPickupSuggestions([]);
@@ -311,6 +327,20 @@ function bindApp() {
   els.orderModalWrap.addEventListener('click', (e) => { if (e.target === els.orderModalWrap) closeModals(); });
   els.inventoryModalWrap.addEventListener('click', (e) => { if (e.target === els.inventoryModalWrap) closeModals(); });
   els.orderForm.addEventListener('submit', handleOrderSave);
+  els.orderForm.elements.exchangeDate?.addEventListener('change', () => setReturnDateFromExchange(false));
+  els.orderForm.elements.returnDate?.addEventListener('change', () => { els.orderForm.elements.returnDate.dataset.userEdited = 'true'; });
+  ['deliveryFee', 'adjustedTotal'].forEach((name) => {
+    els.orderForm.elements[name]?.addEventListener('input', syncOrderTotalsPreview);
+  });
+  els.orderForm.elements.eventDate?.addEventListener('input', () => setExchangeAndReturnFromEventDate(false));
+  ['exchangeDate', 'returnDate'].forEach((name) => {
+    els.orderForm.elements[name]?.addEventListener('input', () => { els.orderForm.elements[name].dataset.userEdited = 'true'; });
+  });
+  document.querySelectorAll('[data-toggle-column]').forEach((btn) => btn.addEventListener('click', () => {
+    const key = btn.dataset.toggleColumn;
+    state.collapsedColumns[key] = !state.collapsedColumns[key];
+    applyOrderColumnCollapseState();
+  }));
   els.inventoryForm.addEventListener('submit', handleInventorySave);
   els.settingsForm.addEventListener('submit', handleSettingsSave);
   els.pickupAddressInput?.addEventListener('input', (event) => debouncedPickupLookup(event.target.value));
@@ -448,6 +478,243 @@ function renderTabs() {
   els.panels.forEach((panel) => panel.classList.toggle('active', panel.dataset.tabPanel === state.activeTab));
 }
 
+
+function calculateOrderItemsSubtotal(items = []) {
+  return (items || []).reduce((sum, item) => sum + Number(item?.subtotal || 0), 0);
+}
+
+function getBaseOrderTotal(order = {}) {
+  const items = Array.isArray(order.items) ? order.items : [];
+  if (items.length) {
+    const originalItemsTotal = items.reduce((sum, item) => sum + (Number(item.quantity || 0) * Number(item.unitPrice || 0)), 0);
+    return originalItemsTotal + Number(order.deliveryFee || 0);
+  }
+  if (Number.isFinite(Number(order.baseTotal)) && Number(order.baseTotal) > 0) return Number(order.baseTotal);
+  return calculateOrderItemsSubtotal(order.items || []) + Number(order.deliveryFee || 0);
+}
+
+function getEffectiveOrderTotal(order = {}) {
+  if (order.adjustedTotal !== '' && order.adjustedTotal != null && !Number.isNaN(Number(order.adjustedTotal))) {
+    return Number(order.adjustedTotal);
+  }
+  if (!Number.isNaN(Number(order.total))) return Number(order.total || 0);
+  return getBaseOrderTotal(order);
+}
+
+function getOrderDiscountAmount(order = {}) {
+  const diff = getBaseOrderTotal(order) - getEffectiveOrderTotal(order);
+  return diff > 0.004 ? diff : 0;
+}
+
+function roundMoney(value) {
+  return Math.round(Number(value || 0) * 100) / 100;
+}
+
+function orderRequiresDeposit(order = {}) {
+  return getEffectiveOrderTotal(order) > DEPOSIT_THRESHOLD;
+}
+
+function getOrderDepositAmount(order = {}) {
+  return orderRequiresDeposit(order) ? roundMoney(getEffectiveOrderTotal(order) * DEPOSIT_RATE) : 0;
+}
+
+function formatOrderValueForUpdate(key, value) {
+  if (key === 'exchangeDate' || key === 'returnDate') return value || 'Not set';
+  if (key === 'exchangeTime' || key === 'returnTime') return value || 'To Be Determined';
+  if (key === 'deliveryFee' || key === 'total' || key === 'adjustedTotal') return currency(value || 0);
+  if (key === 'items') return summarizeOrderItems(value || []);
+  if (key === 'verbalConfirmation') return value ? 'Yes' : 'No';
+  return value || 'Not set';
+}
+
+function collectOrderChanges(previous = {}, next = {}) {
+  const fields = [
+    ['firstName', 'First name'],
+    ['lastName', 'Last name'],
+    ['status', 'Status'],
+    ['paymentStatus', 'Payment status'],
+    ['fulfillmentType', 'Pickup / Delivery'],
+    ['address', 'Address'],
+    ['exchangeDate', 'Exchange date'],
+    ['exchangeTime', 'Exchange time'],
+    ['returnDate', 'Return date'],
+    ['returnTime', 'Return time'],
+    ['deliveryFee', 'Delivery fee'],
+    ['adjustedTotal', 'Adjusted total'],
+    ['verbalConfirmation', 'Verbal confirmation'],
+    ['items', 'Equipment']
+  ];
+  const changes = [];
+  fields.forEach(([key, label]) => {
+    const before = key === 'items' ? JSON.stringify(previous?.[key] || []) : String(previous?.[key] ?? '');
+    const after = key === 'items' ? JSON.stringify(next?.[key] || []) : String(next?.[key] ?? '');
+    if (before === after) return;
+    if (key === 'verbalConfirmation') {
+      changes.push(next?.[key] ? 'Verbal confirmation was marked received.' : 'Verbal confirmation was unchecked.');
+      return;
+    }
+    changes.push(`${label} changed from ${formatOrderValueForUpdate(key, previous?.[key])} to ${formatOrderValueForUpdate(key, next?.[key])}.`);
+  });
+  const beforeTotal = getEffectiveOrderTotal(previous);
+  const afterTotal = getEffectiveOrderTotal(next);
+  if (Math.abs(beforeTotal - afterTotal) > 0.004) {
+    changes.push(`Order total changed from ${currency(beforeTotal)} to ${currency(afterTotal)}.`);
+  }
+  return changes;
+}
+
+function appendOrderUpdate(order, changes = []) {
+  if (!Array.isArray(changes) || !changes.length) return order;
+  const history = Array.isArray(order.updateHistory) ? order.updateHistory.slice() : [];
+  history.push({
+    timestamp: new Date().toISOString(),
+    changes
+  });
+  order.updateHistory = history;
+  return order;
+}
+
+function formatUpdateTimestamp(value) {
+  const stamp = new Date(value || '');
+  if (Number.isNaN(stamp.getTime())) return 'Update';
+  return new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }).format(stamp);
+}
+
+function buildOrderUpdateMessage(order) {
+  const updates = Array.isArray(order?.updateHistory) ? order.updateHistory : [];
+  if (!updates.length) return 'Hello! There has been an update to your order!\n\nNo updates have been logged yet.';
+  const body = updates.map((entry) => `${formatUpdateTimestamp(entry.timestamp)}\n${(entry.changes || []).map((change) => `• ${change}`).join('\n')}`).join('\n\n');
+  return `Hello! There has been an update to your order!\n\n${body}`;
+}
+
+function getPendingReminderChecklist(order) {
+  const missing = [];
+  if (!order.verbalConfirmation) missing.push('Verbally confirm your order with us!');
+  if (orderRequiresDeposit(order) && !['Deposit', 'Paid', 'Free'].includes(order.paymentStatus)) {
+    missing.push(`Pay deposit of ${currency(getOrderDepositAmount(order))}.`);
+  }
+  return missing;
+}
+
+function getItemEffectiveUnitPrice(item) {
+  if (item?.chargedUnitPrice !== '' && item?.chargedUnitPrice != null && !Number.isNaN(Number(item.chargedUnitPrice))) return Number(item.chargedUnitPrice);
+  return Number(item?.unitPrice || 0);
+}
+
+function calculateAdjustedItemsSubtotal(items = []) {
+  return (items || []).reduce((sum, item) => sum + (Number(item.quantity || 0) * getItemEffectiveUnitPrice(item)), 0);
+}
+
+function getOrderPricingAdjustmentLabel(order) {
+  return (order.items || []).some((item) => Number(getItemEffectiveUnitPrice(item)) !== Number(item.unitPrice || 0))
+    ? 'Marked Down'
+    : 'Small Discount Just To Say Thanks';
+}
+
+function getOrderMarkedDownItems(order = {}) {
+  return (order.items || []).filter((item) => Number(getItemEffectiveUnitPrice(item)) < Number(item.unitPrice || 0));
+}
+
+function buildReminderDiscountDetails(order = {}) {
+  const markedDownItems = getOrderMarkedDownItems(order);
+  if (!markedDownItems.length) return '';
+  return markedDownItems.map((item) => {
+    const original = Number(item.unitPrice || 0);
+    const reduced = Number(getItemEffectiveUnitPrice(item));
+    const quantity = Number(item.quantity || 0);
+    const name = item.name || 'Item';
+    const qtyText = quantity > 1 ? ` (x${quantity})` : '';
+    return `• ${name}${qtyText}: marked down from ${currency(original)} each to ${currency(reduced)} each`;
+  }).join('\n');
+}
+
+function syncOrderTotalsPreview() {
+  if (!els.orderForm) return;
+  const inventoryIds = [...els.orderItemsBox.querySelectorAll('[name="item_inventoryId"]')].map((el) => el.value);
+  const quantities = [...els.orderItemsBox.querySelectorAll('[name="item_quantity"]')].map((el) => Number(el.value || 0));
+  const customUnitPrices = [...els.orderItemsBox.querySelectorAll('[name="item_customUnitPrice"]')].map((el) => el.value);
+  const itemsSubtotal = inventoryIds.reduce((sum, inventoryId, index) => {
+    const inv = state.inventory.find((entry) => entry.id === inventoryId);
+    if (!inv) return sum;
+    const quantity = Number(quantities[index] || 0);
+    const customRaw = customUnitPrices[index];
+    const unitPrice = customRaw !== '' && customRaw != null ? Number(customRaw || 0) : Number(inv.price || 0);
+    return sum + (quantity > 0 ? quantity * unitPrice : 0);
+  }, 0);
+  const deliveryFee = Number(els.orderForm.elements.deliveryFee?.value || 0);
+  const baseTotal = itemsSubtotal + deliveryFee;
+  if (els.orderForm.elements.total) {
+    els.orderForm.elements.total.value = baseTotal.toFixed(2);
+  }
+  const adjustedRaw = els.orderForm.elements.adjustedTotal?.value;
+  const adjustedHasValue = adjustedRaw !== '' && adjustedRaw != null;
+  const adjustedTotal = adjustedHasValue ? Number(adjustedRaw || 0) : baseTotal;
+  const discount = Math.max(0, baseTotal - adjustedTotal);
+  if (els.orderDiscountPreview) {
+    const markdownActive = [...els.orderItemsBox.querySelectorAll('[name="item_customUnitPrice"]')].some((el) => el.value !== '');
+    const label = markdownActive ? 'Marked Down' : 'Small Discount Just To Say Thanks';
+    els.orderDiscountPreview.textContent = discount > 0
+      ? `${label}: -${currency(discount)}`
+      : '';
+  }
+}
+
+function setExchangeAndReturnFromEventDate(force = false) {
+  const eventDate = els.orderForm?.elements?.eventDate?.value;
+  const exchangeDateField = els.orderForm?.elements?.exchangeDate;
+  const returnDateField = els.orderForm?.elements?.returnDate;
+  if (!eventDate || !exchangeDateField || !returnDateField) return;
+  if (force || exchangeDateField.dataset.userEdited !== 'true') exchangeDateField.value = addDays(eventDate, -1);
+  if (force || returnDateField.dataset.userEdited !== 'true') returnDateField.value = addDays(eventDate, 1);
+}
+
+function setReturnDateFromExchange(force = false) {
+  const exchangeDate = els.orderForm?.elements?.exchangeDate?.value;
+  const returnDateField = els.orderForm?.elements?.returnDate;
+  if (!exchangeDate || !returnDateField) return;
+  if (!force && returnDateField.dataset.userEdited === 'true') return;
+  returnDateField.value = addDays(exchangeDate, 1);
+}
+
+function applyOrderColumnCollapseState() {
+  const columns = {
+    pending: els.pendingColumn,
+    completed: els.completedColumn
+  };
+  const rail = els.collapsedColumnsRail;
+  const ordersColumns = document.getElementById('ordersColumns');
+  if (!ordersColumns) return;
+
+  const confirmedColumn = els.confirmedColumn;
+  const insertionMap = {
+    pending: () => ordersColumns.insertBefore(columns.pending, confirmedColumn),
+    completed: () => ordersColumns.appendChild(columns.completed)
+  };
+
+  ['pending', 'completed'].forEach((key) => {
+    const column = columns[key];
+    if (!column) return;
+    const collapsed = Boolean(state.collapsedColumns[key]);
+    column.classList.toggle('collapsed', collapsed);
+    const btn = column.querySelector('[data-toggle-column]');
+    if (btn) btn.textContent = collapsed ? 'Expand' : 'Collapse';
+    if (collapsed && rail) {
+      rail.appendChild(column);
+    } else {
+      insertionMap[key]?.();
+    }
+  });
+
+  if (rail) {
+    rail.classList.toggle('has-collapsed-columns', rail.children.length > 0);
+  }
+
+  const hasLeftColumn = !state.collapsedColumns.pending;
+  const hasRightColumn = !state.collapsedColumns.completed;
+  ordersColumns.classList.toggle('has-left-column', hasLeftColumn);
+  ordersColumns.classList.toggle('has-right-column', hasRightColumn);
+}
+
 function renderOrders() {
   const pending = state.orders.filter((o) => getOrderColumn(o.status) === 'pending').sort(compareExchangeAsc);
   const confirmed = state.orders.filter((o) => getOrderColumn(o.status) === 'confirmed').sort(compareExchangeAsc);
@@ -461,6 +728,7 @@ function renderOrders() {
   if (els.confirmedTotal) els.confirmedTotal.textContent = `Total: ${currency(sumOrderTotals(confirmed))}`;
   if (els.completedTotal) els.completedTotal.textContent = `Total: ${currency(sumOrderTotals(completed))}`;
 
+  applyOrderColumnCollapseState();
   bindOrderCardActions();
 }
 
@@ -469,7 +737,7 @@ function fillList(el, html, emptyText) {
 }
 
 function sumOrderTotals(orders = []) {
-  return orders.reduce((sum, order) => sum + Number(order?.total || 0), 0);
+  return orders.reduce((sum, order) => sum + getEffectiveOrderTotal(order), 0);
 }
 
 function renderOrderGroups(orders, mode) {
@@ -510,14 +778,19 @@ function formatGroupHeading(date, mode) {
 function renderOrderAccordion(order, mode) {
   const isOpen = state.expandedOrderId === order.id;
   const itemSummary = summarizeOrderItems(order.items || []);
+  const displayName = `${safeText(order.firstName || '')} ${safeText(order.lastName || '')}`.trim() || 'Unnamed order';
+  const effectiveTotal = getEffectiveOrderTotal(order);
   const headerTitle = mode === 'completed'
-    ? `${safeText(order.firstName)} ${safeText(order.lastName)} · ${currency(order.total)}`
+    ? `${displayName} · ${currency(effectiveTotal)}`
     : safeText(itemSummary);
   const headerSub = mode === 'completed'
     ? `${formatDateTime(order.exchangeDate, order.exchangeTime)}${order.completedAt ? ` · completed ${new Date(order.completedAt).toLocaleString()}` : ''}`
-    : `${safeText(order.firstName)} ${safeText(order.lastName)} · ${formatDateTime(order.exchangeDate, order.exchangeTime)}`;
-  const itemLines = (order.items || []).map((item) => `<div>${safeText(item.name)} × ${item.quantity} <span class="muted">(${currency(item.subtotal)})</span></div>`).join('');
+    : `${displayName} · ${formatDateTime(order.exchangeDate, order.exchangeTime)}`;
+  const itemLines = (order.items || []).map((item) => { const originalSubtotal = Number(item.unitPrice || 0) * Number(item.quantity || 0); const chargedSubtotal = Number(item.subtotal || 0); const markedDown = chargedSubtotal < originalSubtotal; return `<div>${safeText(item.name)} × ${item.quantity} ${markedDown ? `<span class="muted"><s>${currency(originalSubtotal)}</s> → ${currency(chargedSubtotal)}</span>` : `<span class="muted">(${currency(chargedSubtotal)})</span>`}</div>`; }).join('');
   const deliveryLine = Number(order.deliveryFee || 0) > 0 ? `<div><strong>Delivery fee</strong> <span class="muted">(${currency(order.deliveryFee)})</span></div>` : '';
+  const discountAmount = getOrderDiscountAmount(order);
+  const discountLabel = getOrderPricingAdjustmentLabel(order);
+  const discountLine = discountAmount > 0 ? `<div><strong>${safeText(discountLabel)}</strong> <span class="muted">(-${currency(discountAmount)})</span></div>` : '';
   return `
     <div class="order-card order-accordion ${order.status === 'In-Progress' ? 'in-progress' : ''} ${isOpen ? 'open' : ''}">
       <button type="button" class="order-accordion-summary" data-expand-order="${order.id}">
@@ -530,15 +803,17 @@ function renderOrderAccordion(order, mode) {
       </button>
       <div class="order-accordion-body">
         <div class="order-meta small" style="padding-top:14px;">
-          <div><strong>Total:</strong> ${currency(order.total)}</div>
-          <div><strong>Payment:</strong> ${safeText(order.paymentStatus)} · <strong>${safeText(order.fulfillmentType)}</strong></div>
-          <div><strong>Exchange:</strong> ${formatDateTime(order.exchangeDate, order.exchangeTime)}</div>
-          <div><strong>Return:</strong> ${formatDateTime(order.returnDate, order.returnTime)}</div>
+          <div><strong>Total:</strong> ${currency(effectiveTotal)}</div>
+          ${orderRequiresDeposit(order) ? `<div><strong>Deposit Required:</strong> ${currency(getOrderDepositAmount(order))}</div>` : ''}
+          <div><strong>Verbal Confirmation:</strong> ${order.verbalConfirmation ? 'Yes' : 'No'}</div>
+          <div><strong>Payment:</strong> ${safeText(order.paymentStatus)} · <strong>${safeText(order.fulfillmentType || 'To Be Determined')}</strong></div>
+          <div><strong>Exchange:</strong> ${formatDateTime(order.exchangeDate, order.exchangeTime || 'To Be Determined')}</div>
+          <div><strong>Return:</strong> ${formatDateTime(order.returnDate, order.returnTime || 'To Be Determined')}</div>
           ${order.completedAt ? `<div><strong>Completed:</strong> ${new Date(order.completedAt).toLocaleString()}</div>` : ''}
           ${order.address ? `<div><strong>Address:</strong> ${safeText(order.address)}</div>` : ''}
           <div><strong>Contact:</strong> ${safeText(contactSummary(order.contactMethods))}</div>
         </div>
-        <div class="order-items">${itemLines || '<div class="muted">No items</div>'}${deliveryLine}</div>
+        <div class="order-items">${itemLines || '<div class="muted">No items</div>'}${deliveryLine}${discountLine}</div>
         <div class="hr"></div>
         <div class="form-row two">
           <div>
@@ -554,6 +829,8 @@ function renderOrderAccordion(order, mode) {
         <div class="order-action-row">
           <button class="btn btn-primary btn-small" type="button" data-copy-reminder="${order.id}">Copy reminder</button>
           <button class="btn btn-secondary btn-small" type="button" data-text-reminder="${order.id}">Text reminder</button>
+          <button class="btn btn-ghost btn-small" type="button" data-copy-update="${order.id}">Copy update</button>
+          ${order.fulfillmentType === 'Delivery' && order.address ? `<button class="btn btn-ghost btn-small" type="button" data-copy-delivery-address="${order.id}">Copy delivery address</button><a class="btn btn-ghost btn-small" target="_blank" rel="noopener" href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(order.address)}">Open in Google Maps</a>` : ''}
         </div>
         <div class="dot-menu" style="display:flex; justify-content:flex-end;">
           <button class="dot-toggle" type="button" data-menu-toggle="${order.id}" aria-label="Order actions">⋯</button>
@@ -622,6 +899,20 @@ function bindOrderCardActions() {
         return;
       }
 
+      const copyUpdateBtn = event.target.closest('[data-copy-update]');
+      if (copyUpdateBtn) {
+        event.preventDefault();
+        copyUpdateMessage(copyUpdateBtn.dataset.copyUpdate);
+        return;
+      }
+
+      const copyDeliveryBtn = event.target.closest('[data-copy-delivery-address]');
+      if (copyDeliveryBtn) {
+        event.preventDefault();
+        copyDeliveryAddress(copyDeliveryBtn.dataset.copyDeliveryAddress);
+        return;
+      }
+
       if (!event.target.closest('.dot-menu')) {
         document.querySelectorAll('.dot-dropdown').forEach((el) => el.classList.add('hidden'));
       }
@@ -680,16 +971,28 @@ function buildReminderMessage(order) {
   const equipmentText = getReminderEquipmentText(order);
   const eventDate = formatDateTime(order.exchangeDate, order.exchangeTime);
   const locationText = getReminderLocationText(order);
-  return `Hello! This is a friendly reminder of your upcoming rental ${whenText} (${eventDate}).
+  const discountAmount = getOrderDiscountAmount(order);
+  const discountLabel = getOrderPricingAdjustmentLabel(order);
+  const discountDetails = buildReminderDiscountDetails(order);
+  const baseTotal = getBaseOrderTotal(order);
+  const finalTotal = getEffectiveOrderTotal(order);
+  const totalLines = discountAmount > 0
+    ? `• Total: ${currency(baseTotal)}
+• Discount: ${discountLabel} -${currency(discountAmount)}${discountDetails ? `
+${discountDetails}` : ''}
+• Actual Total: ${currency(finalTotal)}`
+    : `• Total: ${currency(finalTotal)}`;
+  const depositLine = orderRequiresDeposit(order) ? `\n• Deposit Required: ${currency(getOrderDepositAmount(order))}` : '';
 
-Order Details:
-• Equipment: ${equipmentText}
-• Method: ${order.fulfillmentType || 'Pickup'}
-• Location: ${locationText.replace(/^(picked up at|delivered to)\s+/i, '')}
+  if (order.status === 'Pending') {
+    const missing = getPendingReminderChecklist(order);
+    const checklist = missing.length
+      ? missing.map((item) => `• ${item}`).join('\n')
+      : '• Final review from our team.';
+    return `Hello! This is a friendly reminder of your upcoming rental ${whenText} (${eventDate}).\n\nOrder Details:\n• Equipment: ${equipmentText}\n• Method: ${order.fulfillmentType || 'Pickup'}\n• Location: ${locationText.replace(/^(picked up at|delivered to)\s+/i, '')}\n\n${totalLines}${depositLine}\n• Payment Status: ${order.paymentStatus || 'Un-Paid'}\n\nThis order is still pending and equipment is not guaranteed until the following items are addressed:\n${checklist}`;
+  }
 
-Total: ${currency(order.total)} (${order.paymentStatus || 'Un-Paid'})
-
-If anything has changed or you need to make adjustments, please let us know. Otherwise, we look forward to taking care of your order ${whenText}!`;
+  return `Hello! This is a friendly reminder of your upcoming rental ${whenText} (${eventDate}).\n\nOrder Details:\n• Equipment: ${equipmentText}\n• Method: ${order.fulfillmentType || 'Pickup'}\n• Location: ${locationText.replace(/^(picked up at|delivered to)\s+/i, '')}\n\n${totalLines}${depositLine}\n• Payment Status: ${order.paymentStatus || 'Un-Paid'}\n\nIf anything has changed or you need to make adjustments, please let us know. Otherwise, we look forward to taking care of your order ${whenText}!`;
 }
 
 function buildPickupAddressMessage() {
@@ -706,6 +1009,29 @@ async function copyReminderMessage(id) {
     alert('Reminder copied to clipboard.');
   } catch (error) {
     window.prompt('Copy your reminder message below:', message);
+  }
+}
+
+async function copyUpdateMessage(id) {
+  const order = getOrderById(id);
+  if (!order) return;
+  const message = buildOrderUpdateMessage(order);
+  try {
+    await navigator.clipboard.writeText(message);
+    alert('Update copied to clipboard.');
+  } catch (error) {
+    window.prompt('Copy your update message below:', message);
+  }
+}
+
+async function copyDeliveryAddress(id) {
+  const order = getOrderById(id);
+  if (!order?.address) return;
+  try {
+    await navigator.clipboard.writeText(order.address);
+    alert('Delivery address copied to clipboard.');
+  } catch (error) {
+    window.prompt('Copy the delivery address below:', order.address);
   }
 }
 
@@ -735,26 +1061,30 @@ function openTextReminder(id) {
 async function updateOrderStatus(id, status) {
   const order = state.orders.find((item) => item.id === id);
   if (!order) return;
+  const before = JSON.parse(JSON.stringify(order));
   order.status = status;
   order.newInquiry = false;
   order.updatedAt = new Date().toISOString();
   if (status === 'Completed' && !order.completedAt) order.completedAt = new Date().toISOString();
   if (status !== 'Completed') order.completedAt = '';
+  appendOrderUpdate(order, collectOrderChanges(before, order));
   await saveAndRefresh('admin-status');
 }
 
 async function updateOrderPayment(id, paymentStatus) {
   const order = state.orders.find((item) => item.id === id);
   if (!order) return;
+  const before = JSON.parse(JSON.stringify(order));
   order.paymentStatus = paymentStatus;
   order.updatedAt = new Date().toISOString();
+  appendOrderUpdate(order, collectOrderChanges(before, order));
   await saveAndRefresh('admin-status');
 }
 
 async function deleteOrder(id) {
   const order = state.orders.find((item) => item.id === id);
   if (!order) return;
-  if (!window.confirm(`Delete order for ${order.firstName} ${order.lastName}?`)) return;
+  if (!window.confirm(`Delete order for ${`${order.firstName || ''} ${order.lastName || ''}`.trim() || 'this order'}?`)) return;
   state.orders = state.orders.filter((item) => item.id !== id);
   if (state.expandedOrderId === id) state.expandedOrderId = null;
   await saveAndRefresh('admin-status');
@@ -827,7 +1157,7 @@ async function deleteInventory(id) {
 
 function renderSettings() {
   const settings = state.settings;
-  ['businessName', 'pickupName', 'pickupAddress', 'deliveryRatePerMile', 'notificationEmail', 'notificationFromName', 'emailjsPublicKey', 'emailjsServiceId', 'emailjsTemplateId'].forEach((field) => {
+  ['businessName', 'pickupName', 'pickupAddress', 'deliveryRatePerMile', 'notificationEmail', 'notificationFromName', 'emailjsPublicKey', 'emailjsServiceId', 'emailjsTemplateId', 'googleMapsApiKey'].forEach((field) => {
     const input = els.settingsForm.elements[field];
     if (input) input.value = settings[field] ?? '';
   });
@@ -856,6 +1186,7 @@ async function handleSettingsSave(event) {
     emailjsPublicKey: (form.get('emailjsPublicKey') || '').trim(),
     emailjsServiceId: (form.get('emailjsServiceId') || '').trim(),
     emailjsTemplateId: (form.get('emailjsTemplateId') || '').trim(),
+    googleMapsApiKey: (form.get('googleMapsApiKey') || '').trim(),
     pickupCoords: null,
     pickupGeocodedAddress: '',
     pickupGeocodeUpdatedAt: ''
@@ -864,7 +1195,7 @@ async function handleSettingsSave(event) {
   if (pickupAddress) {
     try {
       if (els.pickupLookupStatus) els.pickupLookupStatus.textContent = 'Geocoding pickup address…';
-      const geocoded = await geocodeAddress(pickupAddress, { origin: state.settings?.pickupCoords || null });
+      const geocoded = await geocodeAddress(pickupAddress, { origin: state.settings?.pickupCoords || null, context: nextSettings });
       if (geocoded) {
         nextSettings.pickupCoords = { lat: geocoded.lat, lon: geocoded.lon };
         nextSettings.pickupGeocodedAddress = geocoded.label;
@@ -892,20 +1223,33 @@ function openOrderModal(orderId = null) {
 
 function resetOrderForm(order) {
   els.orderForm.reset();
+  ['exchangeDate','returnDate'].forEach((name) => { if (els.orderForm.elements[name]) els.orderForm.elements[name].dataset.userEdited = ''; });
   const now = new Date();
   const defaultDate = now.toISOString().slice(0, 10);
   const values = order || {
-    firstName: '', lastName: '', status: 'Pending', paymentStatus: 'Un-Paid', fulfillmentType: 'Pickup',
-    exchangeDate: defaultDate, exchangeTime: '10:00', returnDate: defaultDate, returnTime: '17:00',
-    total: 0, address: '', deliveryMiles: 0, deliveryFee: 0, notes: ''
+    firstName: '', lastName: '', status: 'Pending', paymentStatus: 'Un-Paid', fulfillmentType: 'Pickup', verbalConfirmation: false,
+    exchangeDate: defaultDate, exchangeTime: '10:00', returnDate: addDays(defaultDate, 1), returnTime: '17:00',
+    total: 0, adjustedTotal: '', eventDate: '', eventTime: '', eventName: '', address: '', deliveryMiles: 0, deliveryFee: 0, notes: ''
   };
   Object.keys(values).forEach((key) => {
     const field = els.orderForm.elements[key];
     if (field) field.value = values[key] ?? '';
   });
+  if (els.orderForm.elements.adjustedTotal) {
+    els.orderForm.elements.adjustedTotal.value = order?.adjustedTotal ?? '';
+  }
+  if (els.orderForm.elements.eventDate) els.orderForm.elements.eventDate.value = order?.eventDate || '';
+  if (els.orderForm.elements.eventTime) els.orderForm.elements.eventTime.value = order?.eventTime || '';
+  if (els.orderForm.elements.eventName) els.orderForm.elements.eventName.value = order?.eventName || '';
+  if (els.orderForm.elements.returnDate) {
+    els.orderForm.elements.returnDate.dataset.userEdited = order ? 'true' : 'false';
+  }
+  setReturnDateFromExchange(!order);
   const selectedMethods = order ? Object.keys(order.contactMethods || {}) : ['text'];
   renderContactMethodInputs(selectedMethods, order?.contactMethods || {});
   renderOrderItemInputs(order?.items || []);
+  if (!order) setExchangeAndReturnFromEventDate(true);
+  syncOrderTotalsPreview();
 }
 
 function renderContactMethodInputs(selectedMethods = [], values = {}) {
@@ -927,7 +1271,7 @@ function renderContactMethodInputs(selectedMethods = [], values = {}) {
 
 function renderOrderItemInputs(items = []) {
   const options = state.inventory.map((item) => `<option value="${item.id}">${safeText(item.name)} (${safeText(item.category)}) - ${currency(item.price)}</option>`).join('');
-  const rows = items.length ? items : [{ inventoryId: state.inventory[0]?.id || '', quantity: 1 }];
+  const rows = items.length ? items : [{ inventoryId: state.inventory[0]?.id || '', quantity: 1, customUnitPrice: '' }];
   els.orderItemsBox.innerHTML = rows.map((item) => renderOrderItemRow(item, options)).join('');
   bindOrderItemRowEvents();
 }
@@ -935,9 +1279,10 @@ function renderOrderItemInputs(items = []) {
 function renderOrderItemRow(item, options) {
   return `
     <div class="card" style="padding:12px; margin-bottom:10px;">
-      <div class="form-row two">
+      <div class="form-row three">
         <div><label>Inventory item</label><select name="item_inventoryId">${options.replace(`value="${item.inventoryId}"`, `value="${item.inventoryId}" selected`)}</select></div>
         <div><label>Quantity</label><input type="number" min="1" name="item_quantity" value="${item.quantity || 1}" /></div>
+        <div><label>Charge Per Unit</label><input type="number" step="0.01" min="0" name="item_customUnitPrice" value="${item.customUnitPrice ?? ''}" placeholder="Default" /></div>
       </div>
       <div style="margin-top:10px;"><button type="button" class="btn btn-ghost btn-small" data-remove-item-row>Remove Item</button></div>
     </div>`;
@@ -946,11 +1291,17 @@ function renderOrderItemRow(item, options) {
 function bindOrderItemRowEvents() {
   document.getElementById('addOrderItemRow').onclick = () => {
     const options = state.inventory.map((item) => `<option value="${item.id}">${safeText(item.name)} (${safeText(item.category)}) - ${currency(item.price)}</option>`).join('');
-    els.orderItemsBox.insertAdjacentHTML('beforeend', renderOrderItemRow({ inventoryId: state.inventory[0]?.id || '', quantity: 1 }, options));
+    els.orderItemsBox.insertAdjacentHTML('beforeend', renderOrderItemRow({ inventoryId: state.inventory[0]?.id || '', quantity: 1, customUnitPrice: '' }, options));
     bindOrderItemRowEvents();
+    syncOrderTotalsPreview();
   };
   els.orderItemsBox.querySelectorAll('[data-remove-item-row]').forEach((btn) => btn.onclick = () => {
     btn.closest('.card').remove();
+    syncOrderTotalsPreview();
+  });
+  els.orderItemsBox.querySelectorAll('[name="item_inventoryId"], [name="item_quantity"], [name="item_customUnitPrice"]').forEach((input) => {
+    input.oninput = syncOrderTotalsPreview;
+    input.onchange = syncOrderTotalsPreview;
   });
 }
 
@@ -961,10 +1312,14 @@ async function handleOrderSave(event) {
   const contactValues = Object.fromEntries(contactChecks.map((key) => [key, form.get(`contact_${key}`) || '']));
   const inventoryIds = [...els.orderItemsBox.querySelectorAll('[name="item_inventoryId"]')].map((el) => el.value);
   const quantities = [...els.orderItemsBox.querySelectorAll('[name="item_quantity"]')].map((el) => Number(el.value || 0));
+  const customUnitPrices = [...els.orderItemsBox.querySelectorAll('[name="item_customUnitPrice"]')].map((el) => el.value);
   const items = inventoryIds.map((inventoryId, index) => {
     const inv = state.inventory.find((entry) => entry.id === inventoryId);
     if (!inv) return null;
     const quantity = Number(quantities[index] || 0);
+    const customRaw = customUnitPrices[index];
+    const chargedUnitPrice = customRaw !== '' && customRaw != null ? Number(customRaw || 0) : '';
+    const effectiveUnitPrice = chargedUnitPrice === '' ? Number(inv.price || 0) : chargedUnitPrice;
     return {
       inventoryId,
       name: inv.name,
@@ -972,19 +1327,29 @@ async function handleOrderSave(event) {
       imageUrl: inv.imageUrl,
       imageData: inv.imageData || '',
       unitPrice: Number(inv.price || 0),
+      chargedUnitPrice,
       quantity,
-      subtotal: quantity * Number(inv.price || 0)
+      subtotal: quantity * effectiveUnitPrice
     };
   }).filter(Boolean).filter((item) => item.quantity > 0);
   const deliveryFee = Number(form.get('deliveryFee') || 0);
-  const manualTotal = Number(form.get('total') || 0);
+  const itemsSubtotal = calculateOrderItemsSubtotal(items);
+  const baseTotal = itemsSubtotal + deliveryFee;
+  const adjustedRaw = form.get('adjustedTotal');
+  const adjustedTotal = adjustedRaw !== '' && adjustedRaw != null ? Number(adjustedRaw || 0) : '';
+  const finalTotal = adjustedTotal === '' ? baseTotal : adjustedTotal;
+  const existingOrder = state.orders.find((entry) => entry.id === state.editingOrderId) || null;
   const order = {
     id: state.editingOrderId || uid('ord'),
-    firstName: form.get('firstName').trim(),
-    lastName: form.get('lastName').trim(),
+    firstName: String(form.get('firstName') || '').trim(),
+    lastName: String(form.get('lastName') || '').trim(),
+    eventDate: form.get('eventDate') || '',
+    eventTime: form.get('eventTime') || '',
+    eventName: String(form.get('eventName') || '').trim(),
     status: form.get('status'),
     paymentStatus: form.get('paymentStatus'),
     fulfillmentType: form.get('fulfillmentType'),
+    verbalConfirmation: Boolean(form.get('verbalConfirmation')),
     address: form.get('address').trim(),
     exchangeDate: form.get('exchangeDate'),
     exchangeTime: form.get('exchangeTime'),
@@ -992,16 +1357,22 @@ async function handleOrderSave(event) {
     returnTime: form.get('returnTime'),
     deliveryMiles: Number(form.get('deliveryMiles') || 0),
     deliveryFee,
-    total: manualTotal,
+    baseTotal,
+    adjustedTotal,
+    total: finalTotal,
+    requiresDeposit: finalTotal > DEPOSIT_THRESHOLD,
+    depositAmount: finalTotal > DEPOSIT_THRESHOLD ? roundMoney(finalTotal * DEPOSIT_RATE) : 0,
     items,
     contactMethods: buildContactMap(contactChecks, contactValues),
     updatedAt: new Date().toISOString(),
-    createdAt: state.orders.find((entry) => entry.id === state.editingOrderId)?.createdAt || new Date().toISOString(),
-    completedAt: form.get('status') === 'Completed' ? (state.orders.find((entry) => entry.id === state.editingOrderId)?.completedAt || new Date().toISOString()) : '',
+    createdAt: existingOrder?.createdAt || new Date().toISOString(),
+    completedAt: form.get('status') === 'Completed' ? (existingOrder?.completedAt || new Date().toISOString()) : '',
     newInquiry: false,
-    source: 'admin'
+    source: existingOrder?.source || 'admin',
+    updateHistory: Array.isArray(existingOrder?.updateHistory) ? existingOrder.updateHistory.slice() : []
   };
-  if (state.editingOrderId) {
+  if (existingOrder) {
+    appendOrderUpdate(order, collectOrderChanges(existingOrder, order));
     state.orders = state.orders.map((entry) => entry.id === state.editingOrderId ? order : entry);
   } else {
     state.orders.unshift(order);
