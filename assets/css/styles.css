@@ -1208,3 +1208,45 @@ input[list] {
 
 .review-submit-inline { margin-top: 18px; display: flex; justify-content: flex-end; }
 .review-submit-inline-btn { min-width: 140px; }
+
+
+body.app-is-busy { overflow: hidden; }
+.app-busy-overlay {
+  position: fixed;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 23, 42, 0.48);
+  z-index: 120;
+  pointer-events: all;
+}
+.app-busy-overlay.open { display: flex; }
+.app-busy-card {
+  min-width: 220px;
+  max-width: min(90vw, 320px);
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  box-shadow: var(--shadow);
+  padding: 18px 20px;
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  text-align: center;
+}
+.app-busy-spinner {
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  border: 3px solid #dbeafe;
+  border-top-color: var(--primary);
+  animation: appBusySpin 0.85s linear infinite;
+}
+.app-busy-message {
+  font-weight: 700;
+  color: var(--ink);
+}
+@keyframes appBusySpin {
+  to { transform: rotate(360deg); }
+}

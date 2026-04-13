@@ -171,7 +171,7 @@
         </div>
         <div class="form-row three">
           <div class="form-row"><label>Status</label><select name="status"> <option>Pending</option><option>Confirmed</option><option>In-Progress</option><option>Completed</option></select></div>
-          <div class="form-row"><label>Payment Status</label><select name="paymentStatus"> <option>Un-Paid</option><option>Deposit</option><option>Paid</option><option>Free</option></select></div>
+          <div class="form-row"><label>Payment Status</label><select name="paymentStatus"> <option>Un-Paid</option><option>Deposit Paid</option><option>Paid</option><option>Free</option></select></div>
           <div class="form-row"><label>Pickup / Delivery</label><select name="fulfillmentType"> <option>Pickup</option><option>Delivery</option><option>To Be Determined</option></select></div>
         </div>
         <div class="form-row" style="grid-column:1/-1;">
@@ -214,6 +214,8 @@
           <div class="form-row"><label>Adjusted Total</label><input type="number" step="0.01" min="0" name="adjustedTotal" placeholder="Optional" /></div>
         </div>
         <div id="orderDiscountPreview" class="small muted"></div>
+
+        <div class="form-row"><label>Notes</label><textarea name="notes" placeholder="Optional notes for this order"></textarea></div>
 
         <div class="card" style="padding:16px;">
           <div class="section-header">
@@ -277,6 +279,14 @@
         </div>
         
 </form>
+    </div>
+  </div>
+
+
+  <div id="appBusyOverlay" class="app-busy-overlay" aria-hidden="true">
+    <div class="app-busy-card">
+      <div class="app-busy-spinner" aria-hidden="true"></div>
+      <div id="appBusyMessage" class="app-busy-message">Saving…</div>
     </div>
   </div>
 

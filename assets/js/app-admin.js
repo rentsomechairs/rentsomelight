@@ -1,7 +1,6 @@
 import { createOrderSnapshot, exportOrdersBackup, getCategories, getInventory, getOrders, getSession, getSettings, importOrdersBackup, loginAdmin, logoutAdmin, saveInventory, saveOrders, saveSettings } from './store.js';
 import { CONTACT_METHODS, ORDER_STATUSES, PAYMENT_STATUSES, addDays, buildContactMap, compareCompletedDesc, compareExchangeAsc, contactSummary, currency, formatDateTime, getOrderColumn, normalizeCategory, overlaps, parseDateTime, safeText, uid } from './utils.js';
 import { debounce, geocodeAddress, searchAddresses } from './geo.js';
-
 const state = {
   inventory: [],
   orders: [],
@@ -17,25 +16,21 @@ const state = {
   collapsedColumns: {
     pending: false,
     completed: false
-  }
+  },
+  busyCount: 0
 };
-
 const els = {};
-
 const DEPOSIT_THRESHOLD = 100;
 const DEPOSIT_RATE = 0.35;
-
 function formatDistanceTag(match) {
   return Number.isFinite(match?.distanceFromOriginMiles)
     ? `${match.distanceFromOriginMiles.toFixed(1)} mi from saved pickup`
     : '';
 }
-
 function hidePickupSuggestions() {
   if (!els.pickupAddressSuggestions) return;
   els.pickupAddressSuggestions.classList.add('hidden');
 }
-
 function renderPickupSuggestions(matches = []) {
   if (!els.pickupAddressSuggestions) return;
   state.pickupSuggestions = Array.isArray(matches) ? matches : [];
@@ -53,8 +48,6 @@ function renderPickupSuggestions(matches = []) {
   `).join('');
   els.pickupAddressSuggestions.classList.remove('hidden');
 }
-
-
 function fileToDataUrl(file) {
   return new Promise((resolve, reject) => {
     if (!file) {
@@ -76,8 +69,6 @@ function fileToDataUrl(file) {
       : 'Save a valid pickup address to store coordinates for delivery quotes.';
   }
 }
-
-
 function loadImageElement(src) {
   return new Promise((resolve, reject) => {
     if (!src) {
@@ -90,12 +81,10 @@ function loadImageElement(src) {
     img.src = src;
   });
 }
-
 async function compressImageFile(file, maxSize = 900, quality = 0.82) {
   if (!file) return '';
   const dataUrl = await fileToDataUrl(file);
   const img = await loadImageElement(dataUrl);
-
   let { width, height } = img;
   const longest = Math.max(width, height);
   if (longest > maxSize) {
@@ -103,20 +92,16 @@ async function compressImageFile(file, maxSize = 900, quality = 0.82) {
     width = Math.max(1, Math.round(width * scale));
     height = Math.max(1, Math.round(height * scale));
   }
-
   const canvas = document.createElement('canvas');
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext('2d');
   ctx.drawImage(img, 0, 0, width, height);
-
   return canvas.toDataURL('image/jpeg', quality);
 }
-
 function getInventoryImageSrc(item) {
   return item?.imageData || item?.imageUrl || '';
 }
-
 function normalizeAccessories(accessories = []) {
   return Array.isArray(accessories) ? accessories.map((entry) => ({
     id: entry?.id || uid('acc'),
@@ -125,26 +110,21 @@ function normalizeAccessories(accessories = []) {
     imageData: entry?.imageData || ''
   })).filter((entry) => entry.name) : [];
 }
-
 function getAccessoryImageSrc(accessory) {
   return accessory?.imageData || '';
 }
-
 function getSelectedAccessoryIds(inventoryId) {
   return Array.isArray(state.selectedAccessories?.[inventoryId]) ? state.selectedAccessories[inventoryId] : [];
 }
-
 function getSelectedAccessoriesForItem(item) {
   const selectedIds = getSelectedAccessoryIds(item.id);
   return normalizeAccessories(item.accessories).filter((accessory) => selectedIds.includes(accessory.id));
 }
-
 function getDisplayImageForPickerItem(item) {
   const selected = getSelectedAccessoriesForItem(item);
   const accessoryWithImage = [...selected].reverse().find((entry) => getAccessoryImageSrc(entry));
   return getAccessoryImageSrc(accessoryWithImage) || getInventoryImageSrc(item);
 }
-
 function createAccessoryRow(accessory = {}) {
   const row = document.createElement('div');
   row.className = 'accessory-admin-row';
@@ -176,7 +156,6 @@ function createAccessoryRow(accessory = {}) {
   row.dataset.accessoryId = accessory.id || uid('acc');
   return row;
 }
-
 function renderAccessoryRows(accessories = []) {
   if (!els.accessoriesBox) return;
   els.accessoriesBox.innerHTML = '';
@@ -189,7 +168,6 @@ function renderAccessoryRows(accessories = []) {
     els.accessoriesBox.appendChild(createAccessoryRow(accessory));
   });
 }
-
 function collectAccessoriesFromForm() {
   if (!els.accessoriesBox) return [];
   return [...els.accessoriesBox.querySelectorAll('.accessory-admin-row')].map((row) => ({
@@ -199,11 +177,7 @@ function collectAccessoriesFromForm() {
     imageData: row.querySelector('[data-acc-image]')?.value || ''
   })).filter((accessory) => accessory.name);
 }
-
-
-
 document.addEventListener('DOMContentLoaded', () => { init().catch(handleFatalError); });
-
 async function init() {
   cacheEls();
   const session = await getSession();
@@ -220,7 +194,6 @@ async function init() {
   await loadData();
   renderAll();
 }
-
 function cacheEls() {
   Object.assign(els, {
     loginView: document.getElementById('loginView'),
@@ -271,10 +244,11 @@ function cacheEls() {
     confirmedColumn: document.getElementById('confirmedColumn'),
     completedColumn: document.getElementById('completedColumn'),
     collapsedColumnsRail: document.getElementById('collapsedColumnsRail'),
-    orderDiscountPreview: document.getElementById('orderDiscountPreview')
+    orderDiscountPreview: document.getElementById('orderDiscountPreview'),
+    appBusyOverlay: document.getElementById('appBusyOverlay'),
+    appBusyMessage: document.getElementById('appBusyMessage')
   });
 }
-
 function bindLogin() {
   els.loginForm?.addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -288,8 +262,6 @@ function bindLogin() {
     }
   });
 }
-
-
   const debouncedPickupLookup = debounce(async (query) => {
     if (!els.pickupAddressSuggestions) return;
     const text = (query || '').trim();
@@ -311,7 +283,6 @@ function bindLogin() {
       if (els.pickupLookupStatus) els.pickupLookupStatus.textContent = 'Autocomplete is unavailable right now. You can still save the typed address.';
     }
   }, 280);
-
 function bindApp() {
   els.tabButtons.forEach((btn) => btn.addEventListener('click', () => setTab(btn.dataset.tabBtn)));
   els.logoutBtn.addEventListener('click', async () => {
@@ -425,20 +396,15 @@ function bindApp() {
     }
   });
 }
-
-
 async function loadImageLibrary() {
   state.imageLibrary = [];
 }
-
 function normalizeLibraryImageUrl(url) {
   return url || '';
 }
-
 function renderImageLibraryOptions(selected = '') {
   return;
 }
-
 function handleInventoryImagePreview() {
   const preview = document.getElementById('inventoryPreview');
   if (!preview) return;
@@ -446,53 +412,82 @@ function handleInventoryImagePreview() {
   preview.src = src;
   preview.hidden = !src;
 }
-
 async function loadData() {
   state.inventory = await getInventory();
-  state.orders = await getOrders();
+  state.orders = (await getOrders()).map((order) => ({
+    ...order,
+    paymentStatus: order.paymentStatus === 'Deposit' ? 'Deposit Paid' : order.paymentStatus
+  }));
   state.settings = await getSettings();
 }
-
-async function saveAndRefresh(actor = 'admin') {
-  await saveInventory(state.inventory);
-  await saveOrders(state.orders, { actor });
-  await saveSettings(state.settings);
-  await loadData();
-  renderAll();
+function setBusyState(isBusy, message = 'Saving…') {
+  if (!els.appBusyOverlay) return;
+  if (isBusy) {
+    state.busyCount = (state.busyCount || 0) + 1;
+    if (els.appBusyMessage) els.appBusyMessage.textContent = message;
+    els.appBusyOverlay.classList.add('open');
+    document.body.classList.add('app-is-busy');
+    return;
+  }
+  state.busyCount = Math.max(0, (state.busyCount || 0) - 1);
+  if (state.busyCount > 0) return;
+  els.appBusyOverlay.classList.remove('open');
+  document.body.classList.remove('app-is-busy');
+  if (els.appBusyMessage) els.appBusyMessage.textContent = 'Saving…';
 }
-
+async function withBusy(task, message = 'Saving…') {
+  setBusyState(true, message);
+  try {
+    return await task();
+  } finally {
+    setBusyState(false);
+  }
+}
+async function saveAndRefresh(actor = 'admin') {
+  await withBusy(async () => {
+    await saveInventory(state.inventory);
+    await saveOrders(state.orders, { actor });
+    await saveSettings(state.settings);
+    await loadData();
+    renderAll();
+  }, 'Saving changes…');
+}
 function renderAll() {
   renderTabs();
   renderOrders();
   renderInventory();
   renderSettings();
 }
-
 function setTab(tab) {
   state.activeTab = tab;
   renderTabs();
 }
-
 function renderTabs() {
   els.tabButtons.forEach((btn) => btn.classList.toggle('active', btn.dataset.tabBtn === state.activeTab));
   els.panels.forEach((panel) => panel.classList.toggle('active', panel.dataset.tabPanel === state.activeTab));
 }
-
-
 function calculateOrderItemsSubtotal(items = []) {
   return (items || []).reduce((sum, item) => sum + Number(item?.subtotal || 0), 0);
 }
-
-function getBaseOrderTotal(order = {}) {
-  const items = Array.isArray(order.items) ? order.items : [];
-  if (items.length) {
-    const originalItemsTotal = items.reduce((sum, item) => sum + (Number(item.quantity || 0) * Number(item.unitPrice || 0)), 0);
-    return originalItemsTotal + Number(order.deliveryFee || 0);
-  }
-  if (Number.isFinite(Number(order.baseTotal)) && Number(order.baseTotal) > 0) return Number(order.baseTotal);
-  return calculateOrderItemsSubtotal(order.items || []) + Number(order.deliveryFee || 0);
+function getListedItemsSubtotal(order = {}) {
+  return (order.items || []).reduce((sum, item) => {
+    const quantity = Number(item.quantity || 0);
+    const baseUnitPrice = Number(item.unitPrice || 0);
+    const accessoryBase = (item.accessories || []).reduce((accSum, accessory) => accSum + (Number(accessory.price || 0) * quantity), 0);
+    return sum + (quantity * baseUnitPrice) + accessoryBase;
+  }, 0);
 }
-
+function getChargedItemsSubtotal(order = {}) {
+  return (order.items || []).reduce((sum, item) => sum + Number(item.subtotal || 0), 0);
+}
+function getBaseOrderTotal(order = {}) {
+  if (Number.isFinite(Number(order.baseTotal))) return Number(order.baseTotal || 0);
+  return getChargedItemsSubtotal(order) + Number(order.deliveryFee || 0);
+}
+function getListedOrderTotal(order = {}) {
+  if (Number.isFinite(Number(order.listedTotal))) return Number(order.listedTotal || 0);
+  return getListedItemsSubtotal(order) + Number(order.deliveryFee || 0);
+}
 function getEffectiveOrderTotal(order = {}) {
   if (order.adjustedTotal !== '' && order.adjustedTotal != null && !Number.isNaN(Number(order.adjustedTotal))) {
     return Number(order.adjustedTotal);
@@ -500,61 +495,99 @@ function getEffectiveOrderTotal(order = {}) {
   if (!Number.isNaN(Number(order.total))) return Number(order.total || 0);
   return getBaseOrderTotal(order);
 }
-
 function getOrderDiscountAmount(order = {}) {
-  const diff = getBaseOrderTotal(order) - getEffectiveOrderTotal(order);
+  const diff = getListedOrderTotal(order) - getEffectiveOrderTotal(order);
   return diff > 0.004 ? diff : 0;
 }
-
 function roundMoney(value) {
   return Math.round(Number(value || 0) * 100) / 100;
 }
-
+function ordinalSuffix(day) {
+  const value = Number(day || 0);
+  if (value % 100 >= 11 && value % 100 <= 13) return 'th';
+  if (value % 10 === 1) return 'st';
+  if (value % 10 === 2) return 'nd';
+  if (value % 10 === 3) return 'rd';
+  return 'th';
+}
+function formatFriendlyDate(date) {
+  if (!date) return 'Not set';
+  const stamp = parseDateTime(date, '12:00');
+  if (!stamp || Number.isNaN(stamp.getTime())) return date;
+  const weekday = new Intl.DateTimeFormat('en-US', { weekday: 'long' }).format(stamp);
+  const month = new Intl.DateTimeFormat('en-US', { month: 'long' }).format(stamp);
+  const day = stamp.getDate();
+  return `${weekday}, ${month} ${day}${ordinalSuffix(day)}, ${stamp.getFullYear()}`;
+}
+function formatFriendlyShortDate(date) {
+  if (!date) return 'Not set';
+  const stamp = parseDateTime(date, '12:00');
+  if (!stamp || Number.isNaN(stamp.getTime())) return date;
+  return new Intl.DateTimeFormat('en-US', {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric'
+  }).format(stamp);
+}
 function orderRequiresDeposit(order = {}) {
   return getEffectiveOrderTotal(order) > DEPOSIT_THRESHOLD;
 }
-
 function getOrderDepositAmount(order = {}) {
   return orderRequiresDeposit(order) ? roundMoney(getEffectiveOrderTotal(order) * DEPOSIT_RATE) : 0;
 }
-
 function formatOrderValueForUpdate(key, value) {
-  if (key === 'exchangeDate' || key === 'returnDate') return value || 'Not set';
-  if (key === 'exchangeTime' || key === 'returnTime') return value || 'To Be Determined';
+  if (key === 'exchangeDate' || key === 'returnDate' || key === 'eventDate') return formatFriendlyDate(value);
+  if (key === 'exchangeTime' || key === 'returnTime' || key === 'eventTime') return value || 'To Be Determined';
   if (key === 'deliveryFee' || key === 'total' || key === 'adjustedTotal') return currency(value || 0);
-  if (key === 'items') return summarizeOrderItems(value || []);
+  if (key === 'items') return summarizeUpdateItems(value || []);
   if (key === 'verbalConfirmation') return value ? 'Yes' : 'No';
   return value || 'Not set';
 }
-
+function summarizeUpdateItems(items = []) {
+  return (items || []).map((item) => {
+    const qty = Number(item.quantity || 0);
+    const accessoryNames = (item.accessories || []).map((acc) => acc.name).filter(Boolean);
+    return `${qty} ${item.name}${accessoryNames.length ? ` with ${accessoryNames.join(', ')}` : ''}`;
+  }).join(', ') || 'No equipment selected';
+}
 function collectOrderChanges(previous = {}, next = {}) {
-  const fields = [
-    ['firstName', 'First name'],
-    ['lastName', 'Last name'],
-    ['status', 'Status'],
-    ['paymentStatus', 'Payment status'],
-    ['fulfillmentType', 'Pickup / Delivery'],
-    ['address', 'Address'],
+  const changes = [];
+  const pairs = [
     ['exchangeDate', 'Exchange date'],
     ['exchangeTime', 'Exchange time'],
     ['returnDate', 'Return date'],
     ['returnTime', 'Return time'],
-    ['deliveryFee', 'Delivery fee'],
-    ['adjustedTotal', 'Adjusted total'],
-    ['verbalConfirmation', 'Verbal confirmation'],
-    ['items', 'Equipment']
+    ['eventDate', 'Event date'],
+    ['eventTime', 'Event time'],
+    ['eventName', 'Event'],
+    ['address', 'Address'],
+    ['notes', 'Note']
   ];
-  const changes = [];
-  fields.forEach(([key, label]) => {
-    const before = key === 'items' ? JSON.stringify(previous?.[key] || []) : String(previous?.[key] ?? '');
-    const after = key === 'items' ? JSON.stringify(next?.[key] || []) : String(next?.[key] ?? '');
+  pairs.forEach(([key, label]) => {
+    const before = String(previous?.[key] ?? '');
+    const after = String(next?.[key] ?? '');
     if (before === after) return;
-    if (key === 'verbalConfirmation') {
-      changes.push(next?.[key] ? 'Verbal confirmation was marked received.' : 'Verbal confirmation was unchecked.');
-      return;
-    }
-    changes.push(`${label} changed from ${formatOrderValueForUpdate(key, previous?.[key])} to ${formatOrderValueForUpdate(key, next?.[key])}.`);
+    changes.push(`${label} changed from "${formatOrderValueForUpdate(key, previous?.[key])}" to "${formatOrderValueForUpdate(key, next?.[key])}".`);
   });
+  if (Boolean(previous?.verbalConfirmation) !== Boolean(next?.verbalConfirmation)) {
+    changes.push(next?.verbalConfirmation ? 'Received verbal confirmation of the order.' : 'Verbal confirmation was removed.');
+  }
+  if (String(previous?.paymentStatus || '') !== String(next?.paymentStatus || '')) {
+    changes.push(`Payment status changed from "${previous?.paymentStatus || 'Not set'}" to "${next?.paymentStatus || 'Not set'}".`);
+  }
+  if (String(previous?.fulfillmentType || '') !== String(next?.fulfillmentType || '')) {
+    changes.push(`Method changed from "${previous?.fulfillmentType || 'Not set'}" to "${next?.fulfillmentType || 'Not set'}".`);
+  }
+  const prevItems = JSON.stringify(previous?.items || []);
+  const nextItems = JSON.stringify(next?.items || []);
+  if (prevItems !== nextItems) {
+    const beforeSummary = summarizeUpdateItems(previous?.items || []);
+    const afterSummary = summarizeUpdateItems(next?.items || []);
+    if (beforeSummary !== afterSummary) {
+      changes.push(`Equipment changed from ${beforeSummary} to ${afterSummary}.`);
+    }
+  }
   const beforeTotal = getEffectiveOrderTotal(previous);
   const afterTotal = getEffectiveOrderTotal(next);
   if (Math.abs(beforeTotal - afterTotal) > 0.004) {
@@ -562,59 +595,46 @@ function collectOrderChanges(previous = {}, next = {}) {
   }
   return changes;
 }
-
 function appendOrderUpdate(order, changes = []) {
   if (!Array.isArray(changes) || !changes.length) return order;
   const history = Array.isArray(order.updateHistory) ? order.updateHistory.slice() : [];
-  history.push({
+  history.unshift({
     timestamp: new Date().toISOString(),
     changes
   });
   order.updateHistory = history;
   return order;
 }
-
-function formatUpdateTimestamp(value) {
-  const stamp = new Date(value || '');
-  if (Number.isNaN(stamp.getTime())) return 'Update';
-  return new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }).format(stamp);
-}
-
 function buildOrderUpdateMessage(order) {
   const updates = Array.isArray(order?.updateHistory) ? order.updateHistory : [];
-  if (!updates.length) return 'Hello! There has been an update to your order!\n\nNo updates have been logged yet.';
-  const body = updates.map((entry) => `${formatUpdateTimestamp(entry.timestamp)}\n${(entry.changes || []).map((change) => `• ${change}`).join('\n')}`).join('\n\n');
-  return `Hello! There has been an update to your order!\n\n${body}`;
+  if (!updates.length) return 'Hello! There has been an update to your order!';
+  const body = updates.flatMap((entry) => (entry.changes || []).map((change) => `• ${change}`)).join('\n');
+  return `Hello! There has been an update to your order!
+${body}`;
 }
-
 function getPendingReminderChecklist(order) {
   const missing = [];
   if (!order.verbalConfirmation) missing.push('Verbally confirm your order with us!');
-  if (orderRequiresDeposit(order) && !['Deposit', 'Paid', 'Free'].includes(order.paymentStatus)) {
+  if (orderRequiresDeposit(order) && !['Deposit Paid', 'Deposit', 'Paid', 'Free'].includes(order.paymentStatus)) {
     missing.push(`Pay deposit of ${currency(getOrderDepositAmount(order))}.`);
   }
   return missing;
 }
-
 function getItemEffectiveUnitPrice(item) {
   if (item?.chargedUnitPrice !== '' && item?.chargedUnitPrice != null && !Number.isNaN(Number(item.chargedUnitPrice))) return Number(item.chargedUnitPrice);
   return Number(item?.unitPrice || 0);
 }
-
 function calculateAdjustedItemsSubtotal(items = []) {
   return (items || []).reduce((sum, item) => sum + (Number(item.quantity || 0) * getItemEffectiveUnitPrice(item)), 0);
 }
-
 function getOrderPricingAdjustmentLabel(order) {
   return (order.items || []).some((item) => Number(getItemEffectiveUnitPrice(item)) !== Number(item.unitPrice || 0))
     ? 'Marked Down'
     : 'Small Discount Just To Say Thanks';
 }
-
 function getOrderMarkedDownItems(order = {}) {
   return (order.items || []).filter((item) => Number(getItemEffectiveUnitPrice(item)) < Number(item.unitPrice || 0));
 }
-
 function buildReminderDiscountDetails(order = {}) {
   const markedDownItems = getOrderMarkedDownItems(order);
   if (!markedDownItems.length) return '';
@@ -627,38 +647,43 @@ function buildReminderDiscountDetails(order = {}) {
     return `• ${name}${qtyText}: marked down from ${currency(original)} each to ${currency(reduced)} each`;
   }).join('\n');
 }
-
 function syncOrderTotalsPreview() {
   if (!els.orderForm) return;
-  const inventoryIds = [...els.orderItemsBox.querySelectorAll('[name="item_inventoryId"]')].map((el) => el.value);
-  const quantities = [...els.orderItemsBox.querySelectorAll('[name="item_quantity"]')].map((el) => Number(el.value || 0));
-  const customUnitPrices = [...els.orderItemsBox.querySelectorAll('[name="item_customUnitPrice"]')].map((el) => el.value);
-  const itemsSubtotal = inventoryIds.reduce((sum, inventoryId, index) => {
+  const rows = [...els.orderItemsBox.querySelectorAll('.card')];
+  const listedItemsSubtotal = rows.reduce((sum, row) => {
+    const inventoryId = row.querySelector('[name="item_inventoryId"]')?.value;
+    const quantity = Number(row.querySelector('[name="item_quantity"]')?.value || 0);
     const inv = state.inventory.find((entry) => entry.id === inventoryId);
     if (!inv) return sum;
-    const quantity = Number(quantities[index] || 0);
-    const customRaw = customUnitPrices[index];
+    const accessoryIds = [...row.querySelectorAll('[data-item-accessory]:checked')].map((input) => input.value);
+    const accessorySubtotal = normalizeAccessories(inv.accessories || []).filter((acc) => accessoryIds.includes(acc.id)).reduce((accSum, acc) => accSum + (Number(acc.price || 0) * quantity), 0);
+    return sum + (Number(inv.price || 0) * quantity) + accessorySubtotal;
+  }, 0);
+  const chargedItemsSubtotal = rows.reduce((sum, row) => {
+    const inventoryId = row.querySelector('[name="item_inventoryId"]')?.value;
+    const quantity = Number(row.querySelector('[name="item_quantity"]')?.value || 0);
+    const customRaw = row.querySelector('[name="item_customUnitPrice"]')?.value;
+    const inv = state.inventory.find((entry) => entry.id === inventoryId);
+    if (!inv) return sum;
     const unitPrice = customRaw !== '' && customRaw != null ? Number(customRaw || 0) : Number(inv.price || 0);
-    return sum + (quantity > 0 ? quantity * unitPrice : 0);
+    const accessoryIds = [...row.querySelectorAll('[data-item-accessory]:checked')].map((input) => input.value);
+    const accessorySubtotal = normalizeAccessories(inv.accessories || []).filter((acc) => accessoryIds.includes(acc.id)).reduce((accSum, acc) => accSum + (Number(acc.price || 0) * quantity), 0);
+    return sum + (quantity * unitPrice) + accessorySubtotal;
   }, 0);
   const deliveryFee = Number(els.orderForm.elements.deliveryFee?.value || 0);
-  const baseTotal = itemsSubtotal + deliveryFee;
-  if (els.orderForm.elements.total) {
-    els.orderForm.elements.total.value = baseTotal.toFixed(2);
-  }
+  const baseTotal = chargedItemsSubtotal + deliveryFee;
+  const listedTotal = listedItemsSubtotal + deliveryFee;
+  if (els.orderForm.elements.total) els.orderForm.elements.total.value = baseTotal.toFixed(2);
   const adjustedRaw = els.orderForm.elements.adjustedTotal?.value;
   const adjustedHasValue = adjustedRaw !== '' && adjustedRaw != null;
   const adjustedTotal = adjustedHasValue ? Number(adjustedRaw || 0) : baseTotal;
-  const discount = Math.max(0, baseTotal - adjustedTotal);
+  const discount = Math.max(0, listedTotal - adjustedTotal);
   if (els.orderDiscountPreview) {
-    const markdownActive = [...els.orderItemsBox.querySelectorAll('[name="item_customUnitPrice"]')].some((el) => el.value !== '');
+    const markdownActive = rows.some((row) => row.querySelector('[name="item_customUnitPrice"]')?.value !== '');
     const label = markdownActive ? 'Marked Down' : 'Small Discount Just To Say Thanks';
-    els.orderDiscountPreview.textContent = discount > 0
-      ? `${label}: -${currency(discount)}`
-      : '';
+    els.orderDiscountPreview.textContent = discount > 0 ? `${label}: -${currency(discount)}` : '';
   }
 }
-
 function setExchangeAndReturnFromEventDate(force = false) {
   const eventDate = els.orderForm?.elements?.eventDate?.value;
   const exchangeDateField = els.orderForm?.elements?.exchangeDate;
@@ -667,7 +692,6 @@ function setExchangeAndReturnFromEventDate(force = false) {
   if (force || exchangeDateField.dataset.userEdited !== 'true') exchangeDateField.value = addDays(eventDate, -1);
   if (force || returnDateField.dataset.userEdited !== 'true') returnDateField.value = addDays(eventDate, 1);
 }
-
 function setReturnDateFromExchange(force = false) {
   const exchangeDate = els.orderForm?.elements?.exchangeDate?.value;
   const returnDateField = els.orderForm?.elements?.returnDate;
@@ -675,7 +699,6 @@ function setReturnDateFromExchange(force = false) {
   if (!force && returnDateField.dataset.userEdited === 'true') return;
   returnDateField.value = addDays(exchangeDate, 1);
 }
-
 function applyOrderColumnCollapseState() {
   const columns = {
     pending: els.pendingColumn,
@@ -684,13 +707,11 @@ function applyOrderColumnCollapseState() {
   const rail = els.collapsedColumnsRail;
   const ordersColumns = document.getElementById('ordersColumns');
   if (!ordersColumns) return;
-
   const confirmedColumn = els.confirmedColumn;
   const insertionMap = {
     pending: () => ordersColumns.insertBefore(columns.pending, confirmedColumn),
     completed: () => ordersColumns.appendChild(columns.completed)
   };
-
   ['pending', 'completed'].forEach((key) => {
     const column = columns[key];
     if (!column) return;
@@ -704,42 +725,33 @@ function applyOrderColumnCollapseState() {
       insertionMap[key]?.();
     }
   });
-
   if (rail) {
     rail.classList.toggle('has-collapsed-columns', rail.children.length > 0);
   }
-
   const hasLeftColumn = !state.collapsedColumns.pending;
   const hasRightColumn = !state.collapsedColumns.completed;
   ordersColumns.classList.toggle('has-left-column', hasLeftColumn);
   ordersColumns.classList.toggle('has-right-column', hasRightColumn);
 }
-
 function renderOrders() {
   const pending = state.orders.filter((o) => getOrderColumn(o.status) === 'pending').sort(compareExchangeAsc);
   const confirmed = state.orders.filter((o) => getOrderColumn(o.status) === 'confirmed').sort(compareExchangeAsc);
   const completed = state.orders.filter((o) => getOrderColumn(o.status) === 'completed').sort(compareCompletedDesc);
-
   fillList(els.pendingList, renderOrderGroups(pending, 'pending'), 'No pending orders yet.');
   fillList(els.confirmedList, renderOrderGroups(confirmed, 'confirmed'), 'No confirmed orders yet.');
   fillList(els.completedList, renderOrderGroups(completed, 'completed'), 'No completed orders yet.');
-
   if (els.pendingTotal) els.pendingTotal.textContent = `Total: ${currency(sumOrderTotals(pending))}`;
   if (els.confirmedTotal) els.confirmedTotal.textContent = `Total: ${currency(sumOrderTotals(confirmed))}`;
   if (els.completedTotal) els.completedTotal.textContent = `Total: ${currency(sumOrderTotals(completed))}`;
-
   applyOrderColumnCollapseState();
   bindOrderCardActions();
 }
-
 function fillList(el, html, emptyText) {
   el.innerHTML = html || `<div class="empty-state">${emptyText}</div>`;
 }
-
 function sumOrderTotals(orders = []) {
   return orders.reduce((sum, order) => sum + getEffectiveOrderTotal(order), 0);
 }
-
 function renderOrderGroups(orders, mode) {
   if (!orders.length) return '';
   const groups = new Map();
@@ -755,26 +767,19 @@ function renderOrderGroups(orders, mode) {
     </div>
   `).join('');
 }
-
 function formatGroupHeading(date, mode) {
   if (mode === 'completed') {
     const stamp = new Date(date);
     if (Number.isNaN(stamp.getTime())) return 'Completed orders';
     return new Intl.DateTimeFormat('en-US', {
+      weekday: 'short',
       month: 'short',
       day: 'numeric',
       year: 'numeric'
     }).format(stamp);
   }
-  const stamp = parseDateTime(date, '12:00');
-  if (!stamp || Number.isNaN(stamp.getTime())) return date;
-  return new Intl.DateTimeFormat('en-US', {
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric'
-  }).format(stamp);
+  return formatFriendlyShortDate(date);
 }
-
 function renderOrderAccordion(order, mode) {
   const isOpen = state.expandedOrderId === order.id;
   const itemSummary = summarizeOrderItems(order.items || []);
@@ -785,8 +790,8 @@ function renderOrderAccordion(order, mode) {
     : safeText(itemSummary);
   const headerSub = mode === 'completed'
     ? `${formatDateTime(order.exchangeDate, order.exchangeTime)}${order.completedAt ? ` · completed ${new Date(order.completedAt).toLocaleString()}` : ''}`
-    : `${displayName} · ${formatDateTime(order.exchangeDate, order.exchangeTime)}`;
-  const itemLines = (order.items || []).map((item) => { const originalSubtotal = Number(item.unitPrice || 0) * Number(item.quantity || 0); const chargedSubtotal = Number(item.subtotal || 0); const markedDown = chargedSubtotal < originalSubtotal; return `<div>${safeText(item.name)} × ${item.quantity} ${markedDown ? `<span class="muted"><s>${currency(originalSubtotal)}</s> → ${currency(chargedSubtotal)}</span>` : `<span class="muted">(${currency(chargedSubtotal)})</span>`}</div>`; }).join('');
+    : `${displayName} · ${formatFriendlyShortDate(order.exchangeDate)}${order.exchangeTime ? `, ${order.exchangeTime}` : ''}`;
+  const itemLines = (order.items || []).map((item) => { const accessoryNames = (item.accessories || []).map((acc) => acc.name).filter(Boolean); const originalSubtotal = (Number(item.unitPrice || 0) * Number(item.quantity || 0)) + (item.accessories || []).reduce((sum, acc) => sum + (Number(acc.price || 0) * Number(item.quantity || 0)), 0); const chargedSubtotal = Number(item.subtotal || 0); const markedDown = chargedSubtotal < originalSubtotal; return `<div>${safeText(item.name)} × ${item.quantity}${accessoryNames.length ? `<div class="small muted">Accessories: ${safeText(accessoryNames.join(', '))}</div>` : ''} ${markedDown ? `<span class="muted"><s>${currency(originalSubtotal)}</s> → ${currency(chargedSubtotal)}</span>` : `<span class="muted">(${currency(chargedSubtotal)})</span>`}</div>`; }).join('');
   const deliveryLine = Number(order.deliveryFee || 0) > 0 ? `<div><strong>Delivery fee</strong> <span class="muted">(${currency(order.deliveryFee)})</span></div>` : '';
   const discountAmount = getOrderDiscountAmount(order);
   const discountLabel = getOrderPricingAdjustmentLabel(order);
@@ -805,12 +810,13 @@ function renderOrderAccordion(order, mode) {
         <div class="order-meta small" style="padding-top:14px;">
           <div><strong>Total:</strong> ${currency(effectiveTotal)}</div>
           ${orderRequiresDeposit(order) ? `<div><strong>Deposit Required:</strong> ${currency(getOrderDepositAmount(order))}</div>` : ''}
-          <div><strong>Verbal Confirmation:</strong> ${order.verbalConfirmation ? 'Yes' : 'No'}</div>
-          <div><strong>Payment:</strong> ${safeText(order.paymentStatus)} · <strong>${safeText(order.fulfillmentType || 'To Be Determined')}</strong></div>
-          <div><strong>Exchange:</strong> ${formatDateTime(order.exchangeDate, order.exchangeTime || 'To Be Determined')}</div>
+          <div><strong>Verbal Confirmation:</strong> ${order.verbalConfirmation ? 'Yes' : 'No'} <label style="margin-left:10px; display:inline-flex; align-items:center; gap:6px;"><input type="checkbox" data-verbal-toggle="${order.id}" ${order.verbalConfirmation ? 'checked' : ''}/> Mark confirmed</label></div>
+          <div><strong>Payment:</strong> ${safeText(order.paymentStatus)} · <strong>${safeText(order.fulfillmentType || 'To Be Determined')}</strong></div>${(order.paymentStatus === 'Deposit Paid' || order.paymentStatus === 'Deposit') ? `<div><strong>Remaining Balance:</strong> ${currency(Math.max(0, getEffectiveOrderTotal(order) - getOrderDepositAmount(order)))}</div>` : ''}
+          ${order.eventDate ? `<div><strong>Event:</strong> ${formatDateTime(order.eventDate, order.eventTime || 'To Be Determined')}${order.eventName ? ` · ${safeText(order.eventName)}` : ''}</div>` : `${order.eventName ? `<div><strong>Event:</strong> ${safeText(order.eventName)}</div>` : ''}`}<div><strong>Exchange:</strong> ${formatDateTime(order.exchangeDate, order.exchangeTime || 'To Be Determined')}</div>
           <div><strong>Return:</strong> ${formatDateTime(order.returnDate, order.returnTime || 'To Be Determined')}</div>
           ${order.completedAt ? `<div><strong>Completed:</strong> ${new Date(order.completedAt).toLocaleString()}</div>` : ''}
           ${order.address ? `<div><strong>Address:</strong> ${safeText(order.address)}</div>` : ''}
+          ${order.notes ? `<div><strong>Notes:</strong> ${safeText(order.notes)}</div>` : ''}
           <div><strong>Contact:</strong> ${safeText(contactSummary(order.contactMethods))}</div>
         </div>
         <div class="order-items">${itemLines || '<div class="muted">No items</div>'}${deliveryLine}${discountLine}</div>
@@ -842,12 +848,10 @@ function renderOrderAccordion(order, mode) {
       </div>
     </div>`;
 }
-
 function summarizeOrderItems(items = []) {
   const parts = items.map((item) => `${item.quantity} ${item.name}`);
   return parts.join(', ') || 'No equipment selected';
 }
-
 function bindOrderCardActions() {
   if (!state.orderActionDelegatesBound) {
     state.orderActionDelegatesBound = true;
@@ -858,7 +862,6 @@ function bindOrderCardActions() {
         renderOrders();
         return;
       }
-
       const menuBtn = event.target.closest('[data-menu-toggle]');
       if (menuBtn) {
         event.preventDefault();
@@ -868,7 +871,6 @@ function bindOrderCardActions() {
         menu?.classList.toggle('hidden');
         return;
       }
-
       const editBtn = event.target.closest('[data-edit-order]');
       if (editBtn) {
         event.preventDefault();
@@ -876,7 +878,6 @@ function bindOrderCardActions() {
         openOrderModal(editBtn.dataset.editOrder);
         return;
       }
-
       const deleteBtn = event.target.closest('[data-delete-order]');
       if (deleteBtn) {
         event.preventDefault();
@@ -884,41 +885,41 @@ function bindOrderCardActions() {
         deleteOrder(deleteBtn.dataset.deleteOrder);
         return;
       }
-
+      const verbalToggle = event.target.closest('[data-verbal-toggle]');
+      if (verbalToggle) {
+        event.stopPropagation();
+        updateOrderVerbalConfirmation(verbalToggle.dataset.verbalToggle, verbalToggle.checked);
+        return;
+      }
       const copyReminderBtn = event.target.closest('[data-copy-reminder]');
       if (copyReminderBtn) {
         event.preventDefault();
         copyReminderMessage(copyReminderBtn.dataset.copyReminder);
         return;
       }
-
       const textReminderBtn = event.target.closest('[data-text-reminder]');
       if (textReminderBtn) {
         event.preventDefault();
         openTextReminder(textReminderBtn.dataset.textReminder);
         return;
       }
-
       const copyUpdateBtn = event.target.closest('[data-copy-update]');
       if (copyUpdateBtn) {
         event.preventDefault();
         copyUpdateMessage(copyUpdateBtn.dataset.copyUpdate);
         return;
       }
-
       const copyDeliveryBtn = event.target.closest('[data-copy-delivery-address]');
       if (copyDeliveryBtn) {
         event.preventDefault();
         copyDeliveryAddress(copyDeliveryBtn.dataset.copyDeliveryAddress);
         return;
       }
-
       if (!event.target.closest('.dot-menu')) {
         document.querySelectorAll('.dot-dropdown').forEach((el) => el.classList.add('hidden'));
       }
     });
   }
-
   document.querySelectorAll('[data-status-select]').forEach((select) => {
     select.onchange = () => updateOrderStatus(select.dataset.statusSelect, select.value);
   });
@@ -926,17 +927,21 @@ function bindOrderCardActions() {
     select.onchange = () => updateOrderPayment(select.dataset.paymentSelect, select.value);
   });
 }
-
-
 function getOrderById(id) {
   return state.orders.find((item) => item.id === id) || null;
 }
-
 function getReminderEquipmentText(order) {
-  const items = (order.items || []).map((item) => `${item.name}${Number(item.quantity || 0) > 1 ? ` (x${item.quantity})` : ''}`);
+  const items = (order.items || []).map((item) => {
+    const qty = Number(item.quantity || 0);
+    const chargedUnitPrice = getItemEffectiveUnitPrice(item);
+    const accessories = (item.accessories || []).map((acc) => `${acc.name} (${currency(acc.price)} each)`).join(', ');
+    const markdownText = chargedUnitPrice < Number(item.unitPrice || 0)
+      ? ` — marked down from ${currency(item.unitPrice || 0)} each to ${currency(chargedUnitPrice)} each`
+      : '';
+    return `${item.name}${qty > 1 ? ` (x${qty})` : ''}${markdownText}${accessories ? ` + ${accessories}` : ''}`;
+  });
   return items.join(', ') || 'Rental equipment';
 }
-
 function getReminderTimingText(order) {
   const target = parseDateTime(order.exchangeDate, order.exchangeTime);
   if (!target || Number.isNaN(target.getTime())) return 'soon';
@@ -950,14 +955,12 @@ function getReminderTimingText(order) {
   if (dayDiff === -1) return 'yesterday';
   return `on ${new Intl.DateTimeFormat('en-US', { month: 'long', day: 'numeric', year: 'numeric' }).format(target)}`;
 }
-
 function getReminderLocationText(order) {
   if (order.fulfillmentType === 'Delivery') {
     return `delivered to ${order.address || order.addressSnapshot || 'the provided delivery address'}`;
   }
   return `picked up at ${state.settings?.pickupAddress || 'the pickup location on file'}`;
 }
-
 function getTextPhoneNumber(order) {
   const raw = order?.contactMethods?.text || '';
   const digits = String(raw).replace(/\D/g, '');
@@ -965,7 +968,6 @@ function getTextPhoneNumber(order) {
   if (digits.length === 10) return `1${digits}`;
   return '';
 }
-
 function buildReminderMessage(order) {
   const whenText = getReminderTimingText(order);
   const equipmentText = getReminderEquipmentText(order);
@@ -974,32 +976,46 @@ function buildReminderMessage(order) {
   const discountAmount = getOrderDiscountAmount(order);
   const discountLabel = getOrderPricingAdjustmentLabel(order);
   const discountDetails = buildReminderDiscountDetails(order);
-  const baseTotal = getBaseOrderTotal(order);
+  const listedTotal = getListedOrderTotal(order);
   const finalTotal = getEffectiveOrderTotal(order);
-  const totalLines = discountAmount > 0
-    ? `• Total: ${currency(baseTotal)}
+  let totalLines = `• Total: ${currency(finalTotal)}`;
+  if (discountAmount > 0) {
+    totalLines = `• Total: ${currency(listedTotal)}
 • Discount: ${discountLabel} -${currency(discountAmount)}${discountDetails ? `
 ${discountDetails}` : ''}
-• Actual Total: ${currency(finalTotal)}`
-    : `• Total: ${currency(finalTotal)}`;
-  const depositLine = orderRequiresDeposit(order) ? `\n• Deposit Required: ${currency(getOrderDepositAmount(order))}` : '';
-
+• Actual Total: ${currency(finalTotal)}`;
+  }
+  const depositRequired = orderRequiresDeposit(order) ? getOrderDepositAmount(order) : 0;
+  const remainingBalance = (order.paymentStatus === 'Deposit Paid' || order.paymentStatus === 'Deposit') ? Math.max(0, finalTotal - depositRequired) : 0;
+  const depositLine = depositRequired ? `
+• Deposit Required: ${currency(depositRequired)}${remainingBalance ? `
+• Remaining Balance: ${currency(remainingBalance)}` : ''}` : '';
   if (order.status === 'Pending') {
     const missing = getPendingReminderChecklist(order);
-    const checklist = missing.length
-      ? missing.map((item) => `• ${item}`).join('\n')
-      : '• Final review from our team.';
-    return `Hello! This is a friendly reminder of your upcoming rental ${whenText} (${eventDate}).\n\nOrder Details:\n• Equipment: ${equipmentText}\n• Method: ${order.fulfillmentType || 'Pickup'}\n• Location: ${locationText.replace(/^(picked up at|delivered to)\s+/i, '')}\n\n${totalLines}${depositLine}\n• Payment Status: ${order.paymentStatus || 'Un-Paid'}\n\nThis order is still pending and equipment is not guaranteed until the following items are addressed:\n${checklist}`;
+    const checklist = missing.length ? missing.map((item) => `• ${item}`).join('\n') : '• Final review from our team.';
+    return `Hello! This is a friendly reminder of your upcoming rental ${whenText} (${eventDate}).
+Order Details:
+• Equipment: ${equipmentText}
+• Method: ${order.fulfillmentType || 'Pickup'}
+• Location: ${locationText.replace(/^(picked up at|delivered to)\s+/i, '')}
+${totalLines}${depositLine}
+• Payment Status: ${order.paymentStatus || 'Un-Paid'}
+This order is still pending and equipment is not guaranteed until the following items are addressed:
+${checklist}`;
   }
-
-  return `Hello! This is a friendly reminder of your upcoming rental ${whenText} (${eventDate}).\n\nOrder Details:\n• Equipment: ${equipmentText}\n• Method: ${order.fulfillmentType || 'Pickup'}\n• Location: ${locationText.replace(/^(picked up at|delivered to)\s+/i, '')}\n\n${totalLines}${depositLine}\n• Payment Status: ${order.paymentStatus || 'Un-Paid'}\n\nIf anything has changed or you need to make adjustments, please let us know. Otherwise, we look forward to taking care of your order ${whenText}!`;
+  return `Hello! This is a friendly reminder of your upcoming rental ${whenText} (${eventDate}).
+Order Details:
+• Equipment: ${equipmentText}
+• Method: ${order.fulfillmentType || 'Pickup'}
+• Location: ${locationText.replace(/^(picked up at|delivered to)\s+/i, '')}
+${totalLines}${depositLine}
+• Payment Status: ${order.paymentStatus || 'Un-Paid'}
+If anything has changed or you need to make adjustments, please let us know. Otherwise, we look forward to taking care of your order ${whenText}!`;
 }
-
 function buildPickupAddressMessage() {
   const pickupAddress = state.settings?.pickupAddress || 'the pickup address on file';
   return `Here is the pickup address! ${pickupAddress}. You can use this to help you make a decision between pickup or delivery.`;
 }
-
 async function copyReminderMessage(id) {
   const order = getOrderById(id);
   if (!order) return;
@@ -1011,7 +1027,6 @@ async function copyReminderMessage(id) {
     window.prompt('Copy your reminder message below:', message);
   }
 }
-
 async function copyUpdateMessage(id) {
   const order = getOrderById(id);
   if (!order) return;
@@ -1023,7 +1038,6 @@ async function copyUpdateMessage(id) {
     window.prompt('Copy your update message below:', message);
   }
 }
-
 async function copyDeliveryAddress(id) {
   const order = getOrderById(id);
   if (!order?.address) return;
@@ -1034,7 +1048,6 @@ async function copyDeliveryAddress(id) {
     window.prompt('Copy the delivery address below:', order.address);
   }
 }
-
 async function copyPickupAddressMessage() {
   const message = buildPickupAddressMessage();
   try {
@@ -1044,7 +1057,6 @@ async function copyPickupAddressMessage() {
     window.prompt('Copy the pickup address message below:', message);
   }
 }
-
 function openTextReminder(id) {
   const order = getOrderById(id);
   if (!order) return;
@@ -1057,7 +1069,6 @@ function openTextReminder(id) {
   const url = `sms:${phone}?&body=${encodeURIComponent(message)}`;
   window.open(url, '_blank');
 }
-
 async function updateOrderStatus(id, status) {
   const order = state.orders.find((item) => item.id === id);
   if (!order) return;
@@ -1070,7 +1081,6 @@ async function updateOrderStatus(id, status) {
   appendOrderUpdate(order, collectOrderChanges(before, order));
   await saveAndRefresh('admin-status');
 }
-
 async function updateOrderPayment(id, paymentStatus) {
   const order = state.orders.find((item) => item.id === id);
   if (!order) return;
@@ -1080,7 +1090,15 @@ async function updateOrderPayment(id, paymentStatus) {
   appendOrderUpdate(order, collectOrderChanges(before, order));
   await saveAndRefresh('admin-status');
 }
-
+async function updateOrderVerbalConfirmation(id, verbalConfirmation) {
+  const order = state.orders.find((item) => item.id === id);
+  if (!order) return;
+  const before = JSON.parse(JSON.stringify(order));
+  order.verbalConfirmation = Boolean(verbalConfirmation);
+  order.updatedAt = new Date().toISOString();
+  appendOrderUpdate(order, collectOrderChanges(before, order));
+  await saveAndRefresh('admin-status');
+}
 async function deleteOrder(id) {
   const order = state.orders.find((item) => item.id === id);
   if (!order) return;
@@ -1089,7 +1107,6 @@ async function deleteOrder(id) {
   if (state.expandedOrderId === id) state.expandedOrderId = null;
   await saveAndRefresh('admin-status');
 }
-
 function renderInventory() {
   const html = state.inventory.map((item) => {
     const stats = inventoryAvailabilityStats(item.id);
@@ -1126,7 +1143,6 @@ function renderInventory() {
   document.querySelectorAll('[data-edit-inventory]').forEach((btn) => btn.addEventListener('click', () => openInventoryModal(btn.dataset.editInventory)));
   document.querySelectorAll('[data-delete-inventory]').forEach((btn) => btn.addEventListener('click', () => deleteInventory(btn.dataset.deleteInventory)));
 }
-
 function inventoryAvailabilityStats(inventoryId) {
   const now = new Date();
   let outNow = 0;
@@ -1146,7 +1162,6 @@ function inventoryAvailabilityStats(inventoryId) {
     pendingToday
   };
 }
-
 async function deleteInventory(id) {
   const item = state.inventory.find((entry) => entry.id === id);
   if (!item) return;
@@ -1154,7 +1169,6 @@ async function deleteInventory(id) {
   state.inventory = state.inventory.filter((entry) => entry.id !== id);
   await saveAndRefresh('admin-status');
 }
-
 function renderSettings() {
   const settings = state.settings;
   ['businessName', 'pickupName', 'pickupAddress', 'deliveryRatePerMile', 'notificationEmail', 'notificationFromName', 'emailjsPublicKey', 'emailjsServiceId', 'emailjsTemplateId', 'googleMapsApiKey'].forEach((field) => {
@@ -1170,9 +1184,9 @@ function renderSettings() {
       : 'Save a valid pickup address to store coordinates for delivery quotes.';
   }
 }
-
 async function handleSettingsSave(event) {
   event.preventDefault();
+  await withBusy(async () => {
   const form = new FormData(els.settingsForm);
   const pickupAddress = (form.get('pickupAddress') || '').trim();
   const nextSettings = {
@@ -1191,7 +1205,6 @@ async function handleSettingsSave(event) {
     pickupGeocodedAddress: '',
     pickupGeocodeUpdatedAt: ''
   };
-
   if (pickupAddress) {
     try {
       if (els.pickupLookupStatus) els.pickupLookupStatus.textContent = 'Geocoding pickup address…';
@@ -1205,14 +1218,13 @@ async function handleSettingsSave(event) {
       if (els.pickupLookupStatus) els.pickupLookupStatus.textContent = 'Could not geocode the pickup address. Saving the typed address only.';
     }
   }
-
   state.settings = nextSettings;
   await saveSettings(state.settings);
   renderSettings();
   els.settingsSaved.textContent = state.settings.pickupCoords ? 'Settings saved.' : 'Settings saved (without pickup coordinates).';
   setTimeout(() => { els.settingsSaved.textContent = ''; }, 1800);
+  }, 'Saving settings…');
 }
-
 function openOrderModal(orderId = null) {
   state.editingOrderId = orderId;
   els.orderModalTitle.textContent = orderId ? 'Edit Order' : 'Add Order';
@@ -1220,7 +1232,6 @@ function openOrderModal(orderId = null) {
   resetOrderForm(order);
   els.orderModalWrap.classList.add('open');
 }
-
 function resetOrderForm(order) {
   els.orderForm.reset();
   ['exchangeDate','returnDate'].forEach((name) => { if (els.orderForm.elements[name]) els.orderForm.elements[name].dataset.userEdited = ''; });
@@ -1233,17 +1244,17 @@ function resetOrderForm(order) {
   };
   Object.keys(values).forEach((key) => {
     const field = els.orderForm.elements[key];
-    if (field) field.value = values[key] ?? '';
+    if (!field) return;
+    if (field.type === 'checkbox') field.checked = Boolean(values[key]);
+    else field.value = values[key] ?? '';
   });
-  if (els.orderForm.elements.adjustedTotal) {
-    els.orderForm.elements.adjustedTotal.value = order?.adjustedTotal ?? '';
-  }
+  if (els.orderForm.elements.adjustedTotal) els.orderForm.elements.adjustedTotal.value = order?.adjustedTotal ?? '';
   if (els.orderForm.elements.eventDate) els.orderForm.elements.eventDate.value = order?.eventDate || '';
   if (els.orderForm.elements.eventTime) els.orderForm.elements.eventTime.value = order?.eventTime || '';
   if (els.orderForm.elements.eventName) els.orderForm.elements.eventName.value = order?.eventName || '';
-  if (els.orderForm.elements.returnDate) {
-    els.orderForm.elements.returnDate.dataset.userEdited = order ? 'true' : 'false';
-  }
+  if (els.orderForm.elements.verbalConfirmation) els.orderForm.elements.verbalConfirmation.checked = Boolean(order?.verbalConfirmation);
+  if (els.orderForm.elements.notes) els.orderForm.elements.notes.value = order?.notes || '';
+  if (els.orderForm.elements.returnDate) els.orderForm.elements.returnDate.dataset.userEdited = order ? 'true' : 'false';
   setReturnDateFromExchange(!order);
   const selectedMethods = order ? Object.keys(order.contactMethods || {}) : ['text'];
   renderContactMethodInputs(selectedMethods, order?.contactMethods || {});
@@ -1251,7 +1262,6 @@ function resetOrderForm(order) {
   if (!order) setExchangeAndReturnFromEventDate(true);
   syncOrderTotalsPreview();
 }
-
 function renderContactMethodInputs(selectedMethods = [], values = {}) {
   const pickWrap = document.getElementById('contactMethodChecks');
   const inputWrap = document.getElementById('contactMethodInputs');
@@ -1268,14 +1278,16 @@ function renderContactMethodInputs(selectedMethods = [], values = {}) {
   pickWrap.querySelectorAll('[data-contact-check]').forEach((input) => input.addEventListener('change', paintInputs));
   paintInputs();
 }
-
 function renderOrderItemInputs(items = []) {
   const options = state.inventory.map((item) => `<option value="${item.id}">${safeText(item.name)} (${safeText(item.category)}) - ${currency(item.price)}</option>`).join('');
-  const rows = items.length ? items : [{ inventoryId: state.inventory[0]?.id || '', quantity: 1, customUnitPrice: '' }];
+  const rows = items.length ? items.map((item) => ({
+    ...item,
+    customUnitPrice: item?.customUnitPrice ?? item?.chargedUnitPrice ?? ''
+  })) : [{ inventoryId: state.inventory[0]?.id || '', quantity: 1, customUnitPrice: '', accessories: [] }];
   els.orderItemsBox.innerHTML = rows.map((item) => renderOrderItemRow(item, options)).join('');
+  [...els.orderItemsBox.querySelectorAll('.card')].forEach((row, index) => renderAccessoryOptionsForRow(row, rows[index]?.accessories || []));
   bindOrderItemRowEvents();
 }
-
 function renderOrderItemRow(item, options) {
   return `
     <div class="card" style="padding:12px; margin-bottom:10px;">
@@ -1284,14 +1296,29 @@ function renderOrderItemRow(item, options) {
         <div><label>Quantity</label><input type="number" min="1" name="item_quantity" value="${item.quantity || 1}" /></div>
         <div><label>Charge Per Unit</label><input type="number" step="0.01" min="0" name="item_customUnitPrice" value="${item.customUnitPrice ?? ''}" placeholder="Default" /></div>
       </div>
+      <div class="order-item-accessories" style="margin-top:10px;"></div>
       <div style="margin-top:10px;"><button type="button" class="btn btn-ghost btn-small" data-remove-item-row>Remove Item</button></div>
     </div>`;
 }
-
+function renderAccessoryOptionsForRow(row, selectedAccessories = []) {
+  const select = row.querySelector('[name="item_inventoryId"]');
+  const wrap = row.querySelector('.order-item-accessories');
+  if (!select || !wrap) return;
+  const inventoryItem = state.inventory.find((entry) => entry.id === select.value);
+  const accessories = normalizeAccessories(inventoryItem?.accessories || []);
+  const selectedIds = (selectedAccessories || []).map((acc) => acc.id || acc).filter(Boolean);
+  if (!accessories.length) {
+    wrap.innerHTML = '<div class="small muted">No accessories for this item.</div>';
+    return;
+  }
+  wrap.innerHTML = `<div class="small muted" style="margin-bottom:6px;">Accessories</div><div class="contact-options">${accessories.map((accessory) => `<label class="check-pill"><input type="checkbox" data-item-accessory value="${accessory.id}" ${selectedIds.includes(accessory.id) ? 'checked' : ''}/> ${safeText(accessory.name)} (${currency(accessory.price)} each)</label>`).join('')}</div>`;
+}
 function bindOrderItemRowEvents() {
   document.getElementById('addOrderItemRow').onclick = () => {
     const options = state.inventory.map((item) => `<option value="${item.id}">${safeText(item.name)} (${safeText(item.category)}) - ${currency(item.price)}</option>`).join('');
-    els.orderItemsBox.insertAdjacentHTML('beforeend', renderOrderItemRow({ inventoryId: state.inventory[0]?.id || '', quantity: 1, customUnitPrice: '' }, options));
+    els.orderItemsBox.insertAdjacentHTML('beforeend', renderOrderItemRow({ inventoryId: state.inventory[0]?.id || '', quantity: 1, customUnitPrice: '', accessories: [] }, options));
+    const newRow = els.orderItemsBox.lastElementChild;
+    if (newRow) renderAccessoryOptionsForRow(newRow, []);
     bindOrderItemRowEvents();
     syncOrderTotalsPreview();
   };
@@ -1299,27 +1326,36 @@ function bindOrderItemRowEvents() {
     btn.closest('.card').remove();
     syncOrderTotalsPreview();
   });
-  els.orderItemsBox.querySelectorAll('[name="item_inventoryId"], [name="item_quantity"], [name="item_customUnitPrice"]').forEach((input) => {
+  els.orderItemsBox.querySelectorAll('[name="item_inventoryId"]').forEach((input) => {
+    input.onchange = () => {
+      renderAccessoryOptionsForRow(input.closest('.card'), []);
+      bindOrderItemRowEvents();
+      syncOrderTotalsPreview();
+    };
+  });
+  els.orderItemsBox.querySelectorAll('[name="item_quantity"], [name="item_customUnitPrice"], [data-item-accessory]').forEach((input) => {
     input.oninput = syncOrderTotalsPreview;
     input.onchange = syncOrderTotalsPreview;
   });
 }
-
 async function handleOrderSave(event) {
   event.preventDefault();
+  await withBusy(async () => {
   const form = new FormData(els.orderForm);
   const contactChecks = [...document.querySelectorAll('[data-contact-check]:checked')].map((input) => input.value);
   const contactValues = Object.fromEntries(contactChecks.map((key) => [key, form.get(`contact_${key}`) || '']));
-  const inventoryIds = [...els.orderItemsBox.querySelectorAll('[name="item_inventoryId"]')].map((el) => el.value);
-  const quantities = [...els.orderItemsBox.querySelectorAll('[name="item_quantity"]')].map((el) => Number(el.value || 0));
-  const customUnitPrices = [...els.orderItemsBox.querySelectorAll('[name="item_customUnitPrice"]')].map((el) => el.value);
-  const items = inventoryIds.map((inventoryId, index) => {
+  const rows = [...els.orderItemsBox.querySelectorAll('.card')];
+  const items = rows.map((row) => {
+    const inventoryId = row.querySelector('[name="item_inventoryId"]')?.value;
     const inv = state.inventory.find((entry) => entry.id === inventoryId);
     if (!inv) return null;
-    const quantity = Number(quantities[index] || 0);
-    const customRaw = customUnitPrices[index];
+    const quantity = Number(row.querySelector('[name="item_quantity"]')?.value || 0);
+    const customRaw = row.querySelector('[name="item_customUnitPrice"]')?.value;
     const chargedUnitPrice = customRaw !== '' && customRaw != null ? Number(customRaw || 0) : '';
     const effectiveUnitPrice = chargedUnitPrice === '' ? Number(inv.price || 0) : chargedUnitPrice;
+    const selectedAccessoryIds = [...row.querySelectorAll('[data-item-accessory]:checked')].map((input) => input.value);
+    const selectedAccessories = normalizeAccessories(inv.accessories || []).filter((accessory) => selectedAccessoryIds.includes(accessory.id));
+    const accessorySubtotal = selectedAccessories.reduce((sum, accessory) => sum + (Number(accessory.price || 0) * quantity), 0);
     return {
       inventoryId,
       name: inv.name,
@@ -1329,12 +1365,15 @@ async function handleOrderSave(event) {
       unitPrice: Number(inv.price || 0),
       chargedUnitPrice,
       quantity,
-      subtotal: quantity * effectiveUnitPrice
+      accessories: selectedAccessories.map((accessory) => ({ id: accessory.id, name: accessory.name, price: Number(accessory.price || 0), imageData: accessory.imageData || '' })),
+      accessorySubtotal,
+      subtotal: (quantity * effectiveUnitPrice) + accessorySubtotal
     };
   }).filter(Boolean).filter((item) => item.quantity > 0);
   const deliveryFee = Number(form.get('deliveryFee') || 0);
-  const itemsSubtotal = calculateOrderItemsSubtotal(items);
-  const baseTotal = itemsSubtotal + deliveryFee;
+  const listedItemsSubtotal = items.reduce((sum, item) => sum + (Number(item.unitPrice || 0) * Number(item.quantity || 0)) + Number(item.accessorySubtotal || 0), 0);
+  const chargedItemsSubtotal = calculateOrderItemsSubtotal(items);
+  const baseTotal = chargedItemsSubtotal + deliveryFee;
   const adjustedRaw = form.get('adjustedTotal');
   const adjustedTotal = adjustedRaw !== '' && adjustedRaw != null ? Number(adjustedRaw || 0) : '';
   const finalTotal = adjustedTotal === '' ? baseTotal : adjustedTotal;
@@ -1357,6 +1396,7 @@ async function handleOrderSave(event) {
     returnTime: form.get('returnTime'),
     deliveryMiles: Number(form.get('deliveryMiles') || 0),
     deliveryFee,
+    listedTotal: listedItemsSubtotal + deliveryFee,
     baseTotal,
     adjustedTotal,
     total: finalTotal,
@@ -1364,6 +1404,7 @@ async function handleOrderSave(event) {
     depositAmount: finalTotal > DEPOSIT_THRESHOLD ? roundMoney(finalTotal * DEPOSIT_RATE) : 0,
     items,
     contactMethods: buildContactMap(contactChecks, contactValues),
+    notes: String(form.get('notes') || '').trim(),
     updatedAt: new Date().toISOString(),
     createdAt: existingOrder?.createdAt || new Date().toISOString(),
     completedAt: form.get('status') === 'Completed' ? (existingOrder?.completedAt || new Date().toISOString()) : '',
@@ -1381,8 +1422,8 @@ async function handleOrderSave(event) {
   closeModals();
   await loadData();
   renderOrders();
+  }, state.editingOrderId ? 'Saving order changes…' : 'Saving order…');
 }
-
 function openInventoryModal(id = null) {
   state.editingInventoryId = id;
   els.inventoryModalTitle.textContent = id ? 'Edit Inventory Item' : 'Add Inventory Item';
@@ -1405,9 +1446,9 @@ function openInventoryModal(id = null) {
   document.getElementById('inventoryPreview').hidden = !document.getElementById('inventoryPreview').src;
   els.inventoryModalWrap.classList.add('open');
 }
-
 async function handleInventorySave(event) {
   event.preventDefault();
+  await withBusy(async () => {
   const form = new FormData(els.inventoryForm);
   const existing = state.inventory.find((entry) => entry.id === state.editingInventoryId);
   const uploadedImageData = (form.get('imageData') || '').toString().trim();
@@ -1434,9 +1475,8 @@ async function handleInventorySave(event) {
   closeModals();
   await loadData();
   renderInventory();
+  }, state.editingInventoryId ? 'Saving inventory changes…' : 'Saving inventory item…');
 }
-
-
 async function handleBackupExport() {
   const payload = await exportOrdersBackup();
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
@@ -1449,12 +1489,10 @@ async function handleBackupExport() {
   URL.revokeObjectURL(url);
   setBackupStatus('Backup downloaded.');
 }
-
 async function handleCreateSnapshot() {
   await createOrderSnapshot('Admin manual snapshot');
   setBackupStatus('Snapshot saved.');
 }
-
 async function handleBackupImport(event) {
   const file = event.target.files?.[0];
   if (!file) return;
@@ -1469,19 +1507,16 @@ async function handleBackupImport(event) {
   setBackupStatus('Backup imported.');
   event.target.value = '';
 }
-
 function setBackupStatus(message) {
   if (!els.backupStatus) return;
   els.backupStatus.textContent = message;
   setTimeout(() => { if (els.backupStatus.textContent === message) els.backupStatus.textContent = ''; }, 2200);
 }
-
 function handleFatalError(error) {
   console.error(error);
   const target = document.getElementById('loginError') || document.body;
   if (target) target.textContent = error?.message || 'Something went wrong.';
 }
-
 function closeModals() {
   els.orderModalWrap.classList.remove('open');
   els.inventoryModalWrap.classList.remove('open');

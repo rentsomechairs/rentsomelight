@@ -6,7 +6,7 @@ export const CONTACT_METHODS = [
 ];
 
 export const ORDER_STATUSES = ['Pending', 'Confirmed', 'In-Progress', 'Completed'];
-export const PAYMENT_STATUSES = ['Un-Paid', 'Deposit', 'Paid', 'Free'];
+export const PAYMENT_STATUSES = ['Un-Paid', 'Deposit Paid', 'Paid', 'Free'];
 export const FULFILLMENT_TYPES = ['Pickup', 'Delivery'];
 
 export function uid(prefix = 'id') {
